@@ -919,6 +919,38 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
+        // BOTONES: BACKUP NOTIFY
+    if (interaction.isButton() && interaction.customId.startsWith("backup_notify_yes_")) {
+      const guildId = interaction.customId.split("backup_notify_yes_")[1];
+
+      const exampleEmbed = new EmbedBuilder()
+        .setColor("#2b2d31")
+        .setTitle("<a:ADVERTENCIA:1477616948937490452> Información importante del servidor")
+        .setDescription(
+          "El servidor ha sido restaurado desde un backup reciente.\n\n" +
+            "Es posible que notes cambios en canales, roles o permisos.\n" +
+            "Si ves algo raro, abre un ticket o contacta con el staff.\n\n" +
+            "Gracias por tu paciencia."
+        );
+
+      await interaction.reply({
+        content:
+          "Aquí tienes un mensaje de ejemplo. Copia este embed y publícalo en el canal de anuncios o donde prefieras:",
+        embeds: [exampleEmbed],
+        flags: 64
+      });
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith("backup_notify_no_")) {
+      await interaction.reply({
+        content:
+          "Perfecto, no se enviará ningún mensaje automático. Recuerda que, por privacidad, el bot no manda DMs masivos a los miembros.",
+        flags: 64
+      });
+      return;
+    }
+
   } catch (error) {
     if (error.code === 10062) { addLog("warning", "Interaccion expirada"); return; }
     addLog("error", "Error interaccion: " + error.message);
