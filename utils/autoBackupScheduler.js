@@ -47,8 +47,25 @@ async function checkAndRunAutoBackups(client, addLog) {
 
         if (addLog) addLog("info", "Ejecutando backup automático para " + guild.name);
 
-        // Capturar datos del servidor
-        const data = await captureBackup(guild);
+        // Validar que el guild está disponible antes de capturar
+        if (!guild.available) {
+          if (addLog) addLog("warning", "Guild " + guild.name + " no disponible (outage), saltando autobackup");
+          continue;
+        }
+
+        // Capturar datos del servidor con protección extra
+        let data;
+        try {
+          data = await captureBackup(guild);
+        } catch (captureError) {
+          if (addLog) addLog("error", "Error capturando datos de " + guild.name + ": " + captureError.message);
+          continue;
+        }
+
+        if (!data) {
+          if (addLog) addLog("error", "No se pudieron capturar datos de " + guild.name);
+          continue;
+        }
 
         // Guardar el backup con un autor especial
         const backupId = await saveBackup(guild_id, "autobackup", data);
