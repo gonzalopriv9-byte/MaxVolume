@@ -103,11 +103,12 @@ const verificationCodes = new Map();
 
 // ==================== EMOJIS ====================
 const EMOJI = {
-  MEGAFONO: "<a:Megafono:1472541640970211523>",
-  TICKET: "<a:Ticket:1472541437470965942>",
+   TICKET: "<a:Ticket:1472541437470965942>",  
   CRUZ: "<a:Cruz:1472540885102235689>",
   CHECK: "<a:Check:1472540340584972509>",
   CORREO: "<a:correo:1472550293152596000>"
+   NUKE: "<a:NUKE:1477617312679858318>",
+ NEXALOGO: "<a:NEXALOGO:1477286399345561682>
 };
 
 // ==================== SENDGRID ====================
@@ -439,7 +440,7 @@ client.on("guildMemberAdd", async (member) => {
 
     const embed = new EmbedBuilder()
       .setColor("#FFD700")
-      .setTitle(EMOJI.MEGAFONO + " BIENVENIDO!")
+      .setTitle(EMOJI.NEXALOGO + " BIENVENIDO!")
       .setDescription("**" + member.user.username + "** se unio al servidor")
       .setThumbnail(member.user.displayAvatarURL({ dynamic: true, size: 256 }))
       .addFields(
@@ -451,7 +452,7 @@ client.on("guildMemberAdd", async (member) => {
       .setTimestamp();
 
     await channel.send({
-      content: EMOJI.MEGAFONO + " **Bienvenido <@" + member.id + ">!** " + EMOJI.MEGAFONO,
+      content: EMOJI.NEXALOGO + " **Bienvenido <@" + member.id + ">!** " + EMOJI.NEXALOGO,
       embeds: [embed],
       files: [{ attachment: imageUrl, name: "bienvenida.webp" }],
       allowedMentions: { users: [member.id] }
