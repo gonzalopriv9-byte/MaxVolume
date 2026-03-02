@@ -4,7 +4,7 @@ const { loadGuildConfig } = require('../utils/configManager');
 // ==================== EMOJIS ANIMADOS ====================
 const EMOJI = {
   CHECK: "<a:Check:1472540340584972509>",
-  CRUZ: "<a:Cruz:1472540885102235689>"
+  CRUZ: "<a:Cruz:1472540885102235689>",
    NUKE: "<a:NUKE:1477617312679858318>",
    NEXALOGO: "<a:NEXALOGO:1477286399345561682>"
 };
