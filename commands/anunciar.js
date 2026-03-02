@@ -81,7 +81,7 @@ module.exports = {
       });
 
       // Construir el mensaje del anuncio
-      let anuncioTexto = `${EMOJI.MEGAFONO} **ANUNCIO**\n\n${msg}`;
+      let anuncioTexto = `${EMOJI.NEXALOGO} **ANUNCIO**\n\n${msg}`;
 
       if (mostrarEnviante) {
         anuncioTexto += `\n\n*Enviado por: ${interaction.user}*`;
