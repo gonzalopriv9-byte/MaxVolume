@@ -253,7 +253,7 @@ rl.on('line', (line) => {
 });
 
 // ==================== READY ====================
-client.once("ready", () => {
+client.once("ready", async () => {
   addLog("success", "Bot conectado: " + client.user.tag);
   addLog("info", "Servidores: " + client.guilds.cache.size);
   TRUSTED_IDS.add(client.user.id);
@@ -282,6 +282,33 @@ client.once("ready", () => {
   addLog("success", "Sistema de backup automático inicializado");
   addLog("success", "Sistema de protección anti-nuke inicializado");
   addLog("info", "Sistema de comandos terminal activado - Escribe /changestatus [TEXTO] para cambiar el estado");
+
+  // ==================== AUTO-PING CADA 15 MINUTOS ====================
+  const GUILD_ID = "1474052533415841823";
+  const CHANNEL_ID = "1478091077893492817";
+
+  try {
+    const guild = await client.guilds.fetch(GUILD_ID);
+    const channel = await guild.channels.fetch(CHANNEL_ID);
+
+    const doAutoPing = async () => {
+      try {
+        const sent = await channel.send({ content: "Pinging..." });
+        const latency = Math.abs(sent.createdTimestamp - Date.now());
+        await sent.edit(`🏓 Pong! Latencia: ${latency}ms`);
+        await channel.setName(`🤖ultimo-ping-${latency}ms`);
+        addLog("info", `[AUTO-PING] Latencia: ${latency}ms - Canal renombrado`);
+      } catch (error) {
+        addLog("error", "[AUTO-PING ERROR] " + error.message);
+      }
+    };
+
+    await doAutoPing();
+    setInterval(doAutoPing, 15 * 60 * 1000);
+    addLog("success", "Sistema de auto-ping activado (cada 15 minutos)");
+  } catch (error) {
+    addLog("error", "Error inicializando auto-ping: " + error.message);
+  }
 });
 
 client.on("error", (error) => addLog("error", "Discord error: " + error.message));
