@@ -14,7 +14,8 @@ const {
   ChannelType,
   PermissionFlagsBits,
   EmbedBuilder,
-  AuditLogEvent
+  AuditLogEvent,
+  ActivityType
 } = require("discord.js");
 
 const express = require("express");
@@ -22,6 +23,7 @@ const { loadCommands } = require("./handlers/commandHandler");
 const sgMail = require("@sendgrid/mail");
 const fetch = require("node-fetch");
 const { createClient } = require("@supabase/supabase-js");
+const readline = require("readline");
 
 const { saveDNI, generateDNINumber } = require("./utils/database");
 const { loadGuildConfig } = require("./utils/configManager");
@@ -215,12 +217,46 @@ async function dmBanNotice(member, reason, until) {
   } catch { /* DMs cerrados */ }
 }
 
+// ==================== READLINE (COMANDOS TERMINAL) ====================
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+  prompt: ''
+});
+
+rl.on('line', (line) => {
+  const input = line.trim();
+
+  if (input.toLowerCase().startsWith('/changestatus ')) {
+    const texto = input.slice('/changestatus '.length).trim();
+
+    if (!texto) {
+      console.log('❌ Debes poner un texto para el estado.');
+      return;
+    }
+
+    if (!client.user) {
+      console.log('❌ El cliente aún no está listo.');
+      return;
+    }
+
+    client.user.setPresence({
+      activities: [{ name: texto, type: ActivityType.Playing }],
+      status: 'online'
+    });
+
+    console.log(`✅ Estado cambiado a: Jugando a "${texto}"`);
+  } else if (input) {
+    console.log(`⚠️ Comando no reconocido: ${input}`);
+  }
+});
+
 // ==================== READY ====================
 client.once("ready", () => {
   addLog("success", "Bot conectado: " + client.user.tag);
   addLog("info", "Servidores: " + client.guilds.cache.size);
   TRUSTED_IDS.add(client.user.id);
-  client.user.setPresence({ status: "online", activities: [{ name: "🛡️ NEXA PROTECTION v1.0", type: 0 }] });
+  client.user.setPresence({ status: "online", activities: [{ name: "🛡️ NEXA PROTECTION v1.0", type: ActivityType.Playing }] });
 
   // ==================== SISTEMA DE BACKUP AUTOMATICO ====================
   const AUTO_BACKUP_CHECK_INTERVAL = 10 * 60 * 1000;
@@ -244,6 +280,7 @@ client.once("ready", () => {
 
   addLog("success", "Sistema de backup automático inicializado");
   addLog("success", "Sistema de protección anti-nuke inicializado");
+  addLog("info", "Sistema de comandos terminal activado - Escribe /changestatus [TEXTO] para cambiar el estado");
 });
 
 client.on("error", (error) => addLog("error", "Discord error: " + error.message));
