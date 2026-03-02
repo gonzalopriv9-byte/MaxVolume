@@ -23,7 +23,11 @@ async function listBackups(guildId) {
 }
 
 async function captureBackup(guild) {
-  await guild.members.fetch();
+  try {
+    await guild.members.fetch();
+  } catch (e) {
+    console.warn("No se pudieron cargar todos los miembros: " + e.message);
+  }
 
   const roles = guild.roles.cache
     .filter(r => !r.managed && r.id !== guild.id)
@@ -38,10 +42,11 @@ async function captureBackup(guild) {
     .sort((a, b) => a.position - b.position)
     .map(c => ({
       name: c.name, position: c.position,
-      permissionOverwrites: c.permissionOverwrites.cache.map(p => ({
-        targetId: p.id, type: p.type,
-        allow: p.allow.bitfield.toString(), deny: p.deny.bitfield.toString()
-      }))
+      permissionOverwrites: c.permissionOverwrites?.cache ? 
+        Array.from(c.permissionOverwrites.cache.values()).map(p => ({
+          targetId: p.id, type: p.type,
+          allow: p.allow.bitfield.toString(), deny: p.deny.bitfield.toString()
+        })) : []
     }));
 
   const channels = guild.channels.cache
@@ -51,10 +56,11 @@ async function captureBackup(guild) {
       name: c.name, type: c.type, topic: c.topic || null,
       nsfw: c.nsfw || false, rateLimitPerUser: c.rateLimitPerUser || 0,
       position: c.position, parentName: c.parent?.name || null,
-      permissionOverwrites: c.permissionOverwrites.cache.map(p => ({
-        targetId: p.id, type: p.type,
-        allow: p.allow.bitfield.toString(), deny: p.deny.bitfield.toString()
-      }))
+      permissionOverwrites: c.permissionOverwrites?.cache ? 
+        Array.from(c.permissionOverwrites.cache.values()).map(p => ({
+          targetId: p.id, type: p.type,
+          allow: p.allow.bitfield.toString(), deny: p.deny.bitfield.toString()
+        })) : []
     }));
 
   const members = guild.members.cache
