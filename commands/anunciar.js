@@ -3,9 +3,10 @@ const { loadGuildConfig } = require('../utils/configManager');
 
 // ==================== EMOJIS ANIMADOS ====================
 const EMOJI = {
-  MEGAFONO: "<a:Megafono:1472541640970211523>",
   CHECK: "<a:Check:1472540340584972509>",
   CRUZ: "<a:Cruz:1472540885102235689>"
+   NUKE: "<a:NUKE:1477617312679858318>",
+   NEXALOGO: "<a:NEXALOGO:1477286399345561682>"
 };
 
 // ==================== SISTEMA ANTI-DUPLICADOS MEJORADO ====================
