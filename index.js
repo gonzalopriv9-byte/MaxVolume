@@ -512,7 +512,9 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.reply({ content: "El bot esta en mantenimiento.", flags: 64 });
       }
       const command = client.commands.get(interaction.commandName);
-      if (!command) return;
+      if (!command) {
+        return interaction.reply({ content: EMOJI.CRUZ + " Comando no reconocido.", flags: 64 });
+      }
       try {
         await command.execute(interaction);
         addLog("info", "/" + interaction.commandName + " por " + interaction.user.tag);
@@ -1240,6 +1242,7 @@ if (botEnabled) {
 
 // ==================== WEB SERVER ====================
 const app = express();
+app.use(express.static('public'));
 
 app.get("/", (req, res) => {
   res.send("<h1>🛡️ NexaBot v1.0 - Protection Active</h1><p>Servidores: " + (client.guilds?.cache.size || 0) + "</p><p>Status: ✅ Online</p>");
