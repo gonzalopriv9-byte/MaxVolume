@@ -120,6 +120,10 @@ if (process.env.SENDGRID_API_KEY) {
 const logs = [];
 const MAX_LOGS = 100;
 
+// LOGS PARA LILYGO (últimas 20 líneas limpias)
+const lilygoLogs = [];
+const MAX_LILYGO_LOGS = 20;
+
 function addLog(type, message) {
   const timestamp = new Date().toLocaleString("es-ES", {
     timeZone: "Europe/Madrid",
@@ -131,6 +135,12 @@ function addLog(type, message) {
   const emoji = { info: "📋", success: "✅", error: "❌", warning: "⚠️" };
   console.log((emoji[type] || "📝") + " [" + timestamp + "] " + message);
   saveLogSupabase(type, message).catch(() => {});
+
+  // AÑADIR LOG PARA LILYGO (solo timestamp corto + mensaje)
+  const shortTime = new Date().toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const emojiSimple = { info: "i", success: "✓", error: "X", warning: "!" }[type] || "·";
+  lilygoLogs.push("[" + shortTime + "] " + emojiSimple + " " + message);
+  if (lilygoLogs.length > MAX_LILYGO_LOGS) lilygoLogs.shift();
 }
 
 // ==================== VALIDAR VARIABLES ====================
@@ -214,7 +224,7 @@ async function handleBotFlood(message) {
 async function dmBanNotice(member, reason, until) {
   const untilText = until ? new Date(until).toLocaleString("es-ES") : "nunca";
   try {
-    await member.send({ content: "Has sido baneado por Nexa Protection.\nMotivo: " + (reason || "Sin especificar") + "\nBan hasta: " + untilText });
+    await member.send({ content: "Has sido baneado por Nexa Protection.\\nMotivo: " + (reason || "Sin especificar") + "\\nBan hasta: " + untilText });
   } catch { /* DMs cerrados */ }
 }
 
@@ -685,7 +695,7 @@ client.on("interactionCreate", async (interaction) => {
 
         const descripcion = Object.entries(ticketData)
           .map(([k, v]) => `**${k}:** ${v}`)
-          .join("\n");
+          .join("\\n");
 
         const embed = new EmbedBuilder()
           .setColor("#00BFFF")
@@ -724,10 +734,10 @@ client.on("interactionCreate", async (interaction) => {
         const direccion = interaction.fields.getTextInputValue("direccion");
         const telefono = interaction.fields.getTextInputValue("telefono");
 
-        if (!/^\d{2}\/\d{2}\/\d{4}$/.test(fechaNacimiento)) {
+        if (!/^\\d{2}\\/\\d{2}\\/\\d{4}$/.test(fechaNacimiento)) {
           return interaction.editReply({ content: EMOJI.CRUZ + " Formato de fecha invalido. Usa DD/MM/AAAA" });
         }
-        if (!/^\d{9,15}$/.test(telefono.replace(/\s/g, ""))) {
+        if (!/^\\d{9,15}$/.test(telefono.replace(/\\s/g, ""))) {
           return interaction.editReply({ content: EMOJI.CRUZ + " Telefono invalido. Solo numeros (9-15 digitos)." });
         }
 
@@ -887,7 +897,7 @@ client.on("interactionCreate", async (interaction) => {
             const allMessages = await channel.messages.fetch({ limit: 100 });
             const transcript = Array.from(allMessages.values()).reverse()
               .map((m) => "[" + m.createdAt.toLocaleString("es-ES") + "] " + m.author.tag + ": " + m.content)
-              .join("\n");
+              .join("\\n");
 
             await supabase.from("ticket_transcripts").insert({ channel_id: channel.id, guild_id: interaction.guild.id, transcript, saved_at: new Date().toISOString() });
 
@@ -973,7 +983,7 @@ client.on("interactionCreate", async (interaction) => {
         await interaction.reply({ content: EMOJI.CHECK + " Te he enviado un MD.", flags: 64 });
         await interaction.user.send({
           embeds: [new EmbedBuilder().setColor("#5865F2").setTitle("✅ Verificacion de Email")
-            .setDescription("**Paso 1:** Envia tu correo electronico aqui.\n\nEjemplo: `micorreo@gmail.com`\n\nTienes 5 minutos.").setTimestamp()]
+            .setDescription("**Paso 1:** Envia tu correo electronico aqui.\\n\\nEjemplo: `micorreo@gmail.com`\\n\\nTienes 5 minutos.").setTimestamp()]
         });
         verificationCodes.set(interaction.user.id, { step: "waiting_email", guildId: interaction.guild.id, timestamp: Date.now() });
         addLog("info", "Verificacion iniciada: " + interaction.user.tag);
@@ -992,9 +1002,9 @@ client.on("interactionCreate", async (interaction) => {
         .setColor("#2b2d31")
         .setTitle("<a:ADVERTENCIA:1477616948937490452> Información importante del servidor")
         .setDescription(
-          "El servidor ha sido restaurado desde un backup reciente.\n\n" +
-            "Es posible que notes cambios en canales, roles o permisos.\n" +
-            "Si ves algo raro, abre un ticket o contacta con el staff.\n\n" +
+          "El servidor ha sido restaurado desde un backup reciente.\\n\\n" +
+            "Es posible que notes cambios en canales, roles o permisos.\\n" +
+            "Si ves algo raro, abre un ticket o contacta con el staff.\\n\\n" +
             "Gracias por tu paciencia."
         );
 
@@ -1034,10 +1044,10 @@ async function actualizarPanelTrabajos(interaction, guildConfig) {
 
     const trabajosList = Object.entries(TRABAJOS)
       .map(([k, t]) => t.emoji + " **" + t.nombre + ":** `" + contadores[k] + "` personas")
-      .join("\n");
+      .join("\\n");
 
     const embed = new EmbedBuilder().setColor("#00BFFF").setTitle("💼 CENTRO DE EMPLEO")
-      .setDescription("Selecciona tu trabajo:\n\n**Personal actual:**\n" + trabajosList + "\n\n• Solo puedes tener un trabajo\n• Al elegir uno nuevo pierdes el anterior")
+      .setDescription("Selecciona tu trabajo:\\n\\n**Personal actual:**\\n" + trabajosList + "\\n\\n• Solo puedes tener un trabajo\\n• Al elegir uno nuevo pierdes el anterior")
       .setFooter({ text: "Sistema de empleos" }).setTimestamp();
 
     const rows = [];
@@ -1108,7 +1118,7 @@ client.on("messageCreate", async (message) => {
       activeAIProcessing.set(message.id, true);
 
       try {
-        const prompt = message.content.replace(/<@!?\d+>/g, "").trim();
+        const prompt = message.content.replace(/<@!?\\d+>/g, "").trim();
         if (!prompt) { activeAIProcessing.delete(message.id); return message.reply("Menciónami con una pregunta."); }
 
         await message.channel.sendTyping();
@@ -1134,7 +1144,7 @@ client.on("messageCreate", async (message) => {
         if (aiResponse.length <= 2000) {
           await message.reply(aiResponse);
         } else {
-          const chunks = aiResponse.match(/[\s\S]{1,2000}/g) || [];
+          const chunks = aiResponse.match(/[\\s\\S]{1,2000}/g) || [];
           for (const chunk of chunks) await message.channel.send(chunk);
         }
         addLog("success", "IA respondio a " + message.author.tag);
@@ -1159,7 +1169,7 @@ client.on("messageCreate", async (message) => {
       try {
         if (userData.step === "waiting_email") {
           const email = message.content.trim();
-          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return message.reply(EMOJI.CRUZ + " Email invalido.");
+          if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) return message.reply(EMOJI.CRUZ + " Email invalido.");
 
           const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
 
@@ -1171,12 +1181,12 @@ client.on("messageCreate", async (message) => {
           });
 
           verificationCodes.set(message.author.id, { step: "waiting_code", code: verificationCode, email, guildId: userData.guildId, timestamp: Date.now() });
-          await message.reply({ embeds: [new EmbedBuilder().setColor("#00FF00").setTitle(EMOJI.CHECK + " Codigo Enviado").setDescription("Codigo enviado a **" + email + "**. Revisa spam.\n\nEnvia el codigo de 6 digitos.").setTimestamp()] });
+          await message.reply({ embeds: [new EmbedBuilder().setColor("#00FF00").setTitle(EMOJI.CHECK + " Codigo Enviado").setDescription("Codigo enviado a **" + email + "**. Revisa spam.\\n\\nEnvia el codigo de 6 digitos.").setTimestamp()] });
           addLog("success", "Codigo de verificacion enviado a " + email);
 
         } else if (userData.step === "waiting_code") {
           const inputCode = message.content.trim();
-          if (!/^\d{6}$/.test(inputCode)) return message.reply(EMOJI.CRUZ + " Codigo invalido. 6 digitos.");
+          if (!/^\\d{6}$/.test(inputCode)) return message.reply(EMOJI.CRUZ + " Codigo invalido. 6 digitos.");
 
           if (inputCode === userData.code) {
             const guild = client.guilds.cache.get(userData.guildId);
@@ -1233,6 +1243,11 @@ const app = express();
 
 app.get("/", (req, res) => {
   res.send("<h1>🛡️ NexaBot v1.0 - Protection Active</h1><p>Servidores: " + (client.guilds?.cache.size || 0) + "</p><p>Status: ✅ Online</p>");
+});
+
+// ENDPOINT PARA LILYGO: devuelve logs limpios en JSON
+app.get("/lilygo/logs", (req, res) => {
+  res.json({ logs: lilygoLogs });
 });
 
 app.listen(process.env.PORT || 10000, "0.0.0.0", () => {
