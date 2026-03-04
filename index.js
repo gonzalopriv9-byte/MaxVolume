@@ -302,12 +302,15 @@ client.once("ready", async () => {
   addLog("info", "Sistema de comandos terminal activado - Escribe /changestatus [TEXTO] para cambiar el estado");
 
   // ==================== AUTO-PING CADA 15 MINUTOS ====================
-  const GUILD_ID = "1474052533415841823";
-  const CHANNEL_ID = "1478091077893492817";
+  const PING_GUILD_ID = process.env.GUILD_ID;
+  const PING_CHANNEL_ID = process.env.PING_CHANNEL_ID;
 
+  if (!PING_GUILD_ID || !PING_CHANNEL_ID) {
+    addLog("warning", "Auto-ping desactivado: falta GUILD_ID o PING_CHANNEL_ID en .env");
+  } else {
   try {
-    const guild = await client.guilds.fetch(GUILD_ID);
-    const channel = await guild.channels.fetch(CHANNEL_ID);
+    const guild = await client.guilds.fetch(PING_GUILD_ID);
+    const channel = await guild.channels.fetch(PING_CHANNEL_ID);
 
     const doAutoPing = async () => {
       try {
@@ -326,6 +329,7 @@ client.once("ready", async () => {
     addLog("success", "Sistema de auto-ping activado (cada 15 minutos)");
   } catch (error) {
     addLog("error", "Error inicializando auto-ping: " + error.message);
+  }
   }
 });
 
