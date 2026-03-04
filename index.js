@@ -19,7 +19,7 @@ const {
 } = require("discord.js");
 
 const express = require("express");
-const { loadCommands } = require("./handlers/commandHandler");
+const { loadCommands, registerCommands } = require("./handlers/commandHandler");
 const sgMail = require("@sendgrid/mail");
 const fetch = require("node-fetch");
 const { createClient } = require("@supabase/supabase-js");
@@ -266,6 +266,14 @@ rl.on('line', (line) => {
 client.once("ready", async () => {
   addLog("success", "Bot conectado: " + client.user.tag);
   addLog("info", "Servidores: " + client.guilds.cache.size);
+
+  // ✅ FIX: Registrar comandos en Discord al arrancar
+  try {
+    await registerCommands(client);
+    addLog("success", "Comandos registrados en Discord correctamente");
+  } catch (e) {
+    addLog("error", "Error registrando comandos: " + e.message);
+  }
   TRUSTED_IDS.add(client.user.id);
   client.user.setPresence({ status: "online", activities: [{ name: "🛡️ NEXA PROTECTION v1.0", type: ActivityType.Playing }] });
 
