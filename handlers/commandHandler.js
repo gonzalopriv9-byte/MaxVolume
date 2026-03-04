@@ -4,7 +4,7 @@ const path = require("path");
 
 const CLIENT_ID = process.env.CLIENT_ID;
 const TOKEN = process.env.DISCORD_TOKEN;
-const TEST_GUILD_ID = "1353793314482028644";
+const TEST_GUILD_ID = process.env.GUILD_ID || "1397702689168556094";
 
 // Paso 1: solo carga los archivos en client.commands (sin registrar en Discord)
 function loadCommands(client) {
