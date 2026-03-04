@@ -1,4 +1,3 @@
-
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 
 module.exports = {
@@ -9,7 +8,7 @@ module.exports = {
   async execute(interaction) {
     const commands = interaction.client.commands;
     const embed = new EmbedBuilder()
-      .setTitle('Comandos de Gabriel Rufian')
+      .setTitle('Comandos de NEXA Bot')
       .setColor('Random')
       .setDescription(commands.size
         ? Array.from(commands.values()).map(c => `**/${c.data.name}** → ${c.data.description}`).join('\n')
