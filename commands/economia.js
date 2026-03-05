@@ -81,6 +81,7 @@ module.exports = {
       }
     }
 
+    // Comandos de usuario
     if (sub === "balance")    return eco.cmdBalance(interaction);
     if (sub === "daily")      return eco.cmdDaily(interaction);
     if (sub === "trabajar")   return eco.cmdWork(interaction);
@@ -127,5 +128,11 @@ module.exports = {
       await eco.updateBalance(target.id, interaction.guild.id, -amount);
       return interaction.reply({ content: `✅ Quitaste **${amount} 💎** a <@${target.id}>`, flags: 64 });
     }
+
+    // Fallback si no se reconoce el subcomando
+    return interaction.reply({
+      content: `❌ Subcomando "${sub}" no reconocido. Esto es un error del bot.`,
+      flags: 64,
+    });
   },
 };
