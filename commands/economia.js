@@ -41,24 +41,21 @@ module.exports = {
       sub.setName("comprar")
         .setDescription("Comprar un item de la tienda")
         .addIntegerOption(opt => opt.setName("item").setDescription("Número del item").setRequired(true).setMinValue(1)))
-    // Admin commands
+    // Admin commands (permisos verificados en execute)
     .addSubcommand(sub =>
       sub.setName("tienda-añadir")
         .setDescription("Añadir item a la tienda [Admin]")
-        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
         .addStringOption(opt => opt.setName("nombre").setDescription("Nombre del item").setRequired(true))
         .addIntegerOption(opt => opt.setName("precio").setDescription("Precio en monedas").setRequired(true).setMinValue(1))
         .addRoleOption(opt => opt.setName("rol").setDescription("Rol que otorga (opcional)")))
     .addSubcommand(sub =>
       sub.setName("dar")
         .setDescription("Dar monedas a un usuario [Admin]")
-        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
         .addUserOption(opt => opt.setName("usuario").setDescription("Usuario").setRequired(true))
         .addIntegerOption(opt => opt.setName("cantidad").setDescription("Cantidad").setRequired(true).setMinValue(1)))
     .addSubcommand(sub =>
       sub.setName("quitar")
         .setDescription("Quitar monedas a un usuario [Admin]")
-        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
         .addUserOption(opt => opt.setName("usuario").setDescription("Usuario").setRequired(true))
         .addIntegerOption(opt => opt.setName("cantidad").setDescription("Cantidad").setRequired(true).setMinValue(1))),
 
@@ -71,6 +68,17 @@ module.exports = {
         content: "🟣 **La economía requiere NEXA Elite** (12,99€/mes)\nActívalo en: `/premium info`",
         flags: 64,
       });
+    }
+
+    // Verificar permisos de administrador para comandos admin
+    const adminCommands = ["tienda-añadir", "dar", "quitar"];
+    if (adminCommands.includes(sub)) {
+      if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
+        return interaction.reply({
+          content: "❌ Necesitas permisos de **Administrador** para usar este comando.",
+          flags: 64,
+        });
+      }
     }
 
     if (sub === "balance")    return eco.cmdBalance(interaction);
