@@ -32,6 +32,12 @@ const { checkAndRunAutoBackups } = require("./utils/autoBackupScheduler");
 const { checkAntiNuke, punishNuker, checkRaidMode, enableRaidMode } = require("./utils/protectionManager");
 const { checkAntiLinks, checkAntiMentions, punishAntiLinks, punishAntiMentions } = require("./utils/messageProtection");
 
+// ── 1. IMPORTS NUEVOS ────────
+const { handleMessage: handleLevelMessage } = require("./utils/levelSystem");
+const advLogs = require("./utils/advancedLogs");
+const { joinGiveaway, checkExpiredGiveaways } = require("./utils/giveawayManager");
+const { votePoll, endPoll, checkExpiredPolls } = require("./utils/pollSystem");
+
 // ==================== DEBUGGING ====================
 console.log(
   "TOKEN detectado:",
@@ -158,7 +164,8 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.DirectMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildModeration
+    GatewayIntentBits.GuildModeration,
+    GatewayIntentBits.GuildVoiceStates
   ]
 });
 
@@ -300,6 +307,13 @@ client.once("ready", async () => {
   addLog("success", "Sistema de backup automático inicializado");
   addLog("success", "Sistema de protección anti-nuke inicializado");
   addLog("info", "Sistema de comandos terminal activado - Escribe /changestatus [TEXTO] para cambiar el estado");
+
+  // ── 2. SCHEDULER SORTEOS/ENCUESTAS ─────
+  setInterval(async () => {
+    await checkExpiredGiveaways(client, addLog).catch(() => {});
+    await checkExpiredPolls(client, addLog).catch(() => {});
+  }, 60 * 1000);
+  addLog("success", "Scheduler de sorteos/encuestas iniciado");
 
   // ==================== AUTO-PING CADA 15 MINUTOS ====================
   const PING_GUILD_ID = process.env.GUILD_ID;
@@ -507,10 +521,87 @@ client.on("guildMemberAdd", async (member) => {
       allowedMentions: { users: [member.id] }
     });
     addLog("success", "Bienvenida enviada: " + member.user.tag);
+
+    // ADVANCED LOGS: miembro entra
+    await advLogs.onMemberJoin(member, guildConfig);
   } catch (error) {
     addLog("error", "Error bienvenida: " + error.message);
     processedWelcomes.delete(member.id);
   }
+});
+
+// ── 4. EVENTOS NUEVOS: ADVANCED LOGS ──────
+
+// ADVANCED LOGS: mensaje borrado
+client.on("messageDelete", async (message) => {
+  if (!message.guild || message.author?.bot) return;
+  try {
+    const config = await loadGuildConfig(message.guild.id);
+    await advLogs.onMessageDelete(message, config);
+  } catch {}
+});
+
+// ADVANCED LOGS: mensaje editado
+client.on("messageUpdate", async (oldMsg, newMsg) => {
+  if (!oldMsg.guild || oldMsg.author?.bot) return;
+  try {
+    const config = await loadGuildConfig(oldMsg.guild.id);
+    await advLogs.onMessageUpdate(oldMsg, newMsg, config);
+  } catch {}
+});
+
+// ADVANCED LOGS: miembro sale
+client.on("guildMemberRemove", async (member) => {
+  try {
+    const config = await loadGuildConfig(member.guild.id);
+    await advLogs.onMemberLeave(member, config);
+  } catch {}
+});
+
+// ADVANCED LOGS: ban
+client.on("guildBanAdd", async (ban) => {
+  try {
+    const config = await loadGuildConfig(ban.guild.id);
+    await advLogs.onMemberBan(ban, config);
+  } catch {}
+});
+
+// ADVANCED LOGS: rol creado/eliminado
+client.on("roleCreate", async (role) => {
+  try {
+    const config = await loadGuildConfig(role.guild.id);
+    await advLogs.onRoleCreate(role, config);
+  } catch {}
+});
+client.on("roleDelete", async (role) => {
+  try {
+    const config = await loadGuildConfig(role.guild.id);
+    await advLogs.onRoleDelete(role, config);
+  } catch {}
+});
+
+// ADVANCED LOGS: canal creado/eliminado
+client.on("channelCreate", async (channel) => {
+  if (!channel.guild) return;
+  try {
+    const config = await loadGuildConfig(channel.guild.id);
+    await advLogs.onChannelCreate(channel, config);
+  } catch {}
+});
+client.on("channelDelete", async (channel) => {
+  if (!channel.guild) return;
+  try {
+    const config = await loadGuildConfig(channel.guild.id);
+    await advLogs.onChannelDelete(channel, config);
+  } catch {}
+});
+
+// ADVANCED LOGS: voz
+client.on("voiceStateUpdate", async (oldState, newState) => {
+  try {
+    const config = await loadGuildConfig(newState.guild?.id || oldState.guild?.id);
+    await advLogs.onVoiceStateUpdate(oldState, newState, config);
+  } catch {}
 });
 
 // ==================== INTERACTION CREATE ====================
@@ -1008,7 +1099,7 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-        // BOTONES: BACKUP NOTIFY
+    // BOTONES: BACKUP NOTIFY
     if (interaction.isButton() && interaction.customId.startsWith("backup_notify_yes_")) {
       const guildId = interaction.customId.split("backup_notify_yes_")[1];
 
@@ -1036,6 +1127,34 @@ client.on("interactionCreate", async (interaction) => {
         content:
           "Perfecto, no se enviará ningún mensaje automático. Recuerda que, por privacidad, el bot no manda DMs masivos a los miembros.",
         flags: 64
+      });
+      return;
+    }
+
+    // ── 5. GIVEAWAY: participar ────────
+    if (interaction.isButton() && interaction.customId.startsWith("giveaway_join_")) {
+      const giveawayId = interaction.customId.replace("giveaway_join_", "");
+      const guildConfig = await loadGuildConfig(interaction.guild.id).catch(() => ({}));
+      await joinGiveaway(interaction, giveawayId, guildConfig);
+      return;
+    }
+
+    // ── 5. POLL: votar ────────
+    if (interaction.isButton() && interaction.customId.startsWith("poll_vote_")) {
+      const parts = interaction.customId.split("_");
+      const pollId    = parts[2];
+      const optionIdx = parseInt(parts[3]);
+      await votePoll(interaction, pollId, optionIdx);
+      return;
+    }
+
+    // ── 5. POLL: cerrar ────────
+    if (interaction.isButton() && interaction.customId.startsWith("poll_end_")) {
+      const pollId = interaction.customId.replace("poll_end_", "");
+      const success = await endPoll(pollId, interaction.guild, interaction.user.id, addLog);
+      await interaction.reply({
+        content: success ? "✅ Encuesta cerrada." : "❌ No puedes cerrar esta encuesta.",
+        flags: 64,
       });
       return;
     }
@@ -1082,7 +1201,7 @@ async function actualizarPanelTrabajos(interaction, guildConfig) {
   }
 }
 
-// ==================== MENSAJES (ANTI-FLOOD + ANTI-LINKS + ANTI-MENTIONS + IA + VERIFICACION) ====================
+// ==================== MENSAJES (ANTI-FLOOD + ANTI-LINKS + ANTI-MENTIONS + NIVELES + IA + VERIFICACION) ====================
 client.on("messageCreate", async (message) => {
   try {
     // ANTI-FLOOD
@@ -1123,6 +1242,14 @@ client.on("messageCreate", async (message) => {
         const config = await loadGuildConfig(message.guild.id);
         await punishAntiMentions(message, config, addLog);
         return;
+      }
+    }
+
+    // ── 3. SISTEMA DE NIVELES (antes del bloque IA) ──
+    if (message.guild && !message.author.bot) {
+      const guildConfig = await loadGuildConfig(message.guild.id).catch(() => null);
+      if (guildConfig) {
+        await handleLevelMessage(message, addLog, guildConfig).catch(() => {});
       }
     }
 
