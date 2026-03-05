@@ -22,8 +22,7 @@ module.exports = {
         .setDescription("Ver el ranking de niveles del servidor"))
     .addSubcommand(sub =>
       sub.setName("config")
-        .setDescription("Configurar el sistema de niveles")
-        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .setDescription("Configurar el sistema de niveles [Admin]")
         .addBooleanOption(opt => opt.setName("activar").setDescription("Activar/desactivar sistema").setRequired(true))
         .addChannelOption(opt => opt.setName("canal").setDescription("Canal donde anunciar los level ups"))
         .addRoleOption(opt => opt.setName("rol-nivel5").setDescription("Rol automático al llegar a nivel 5"))
@@ -32,13 +31,22 @@ module.exports = {
         .addRoleOption(opt => opt.setName("rol-nivel50").setDescription("Rol automático al llegar a nivel 50")))
     .addSubcommand(sub =>
       sub.setName("ignorar-canal")
-        .setDescription("Ignorar un canal para ganar XP")
-        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .setDescription("Ignorar un canal para ganar XP [Admin]")
         .addChannelOption(opt => opt.setName("canal").setDescription("Canal a ignorar").setRequired(true))),
 
   async execute(interaction) {
     const sub = interaction.options.getSubcommand();
     await interaction.deferReply();
+
+    // Verificar permisos de administrador para comandos admin
+    const adminCommands = ["config", "ignorar-canal"];
+    if (adminCommands.includes(sub)) {
+      if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
+        return interaction.editReply({
+          content: "❌ Necesitas permisos de **Administrador** para usar este comando.",
+        });
+      }
+    }
 
     // ==================== VER NIVEL ====================
     if (sub === "ver") {
