@@ -140,21 +140,6 @@ module.exports = {
 
         const log = await restoreBackup(interaction.guild, backup.data);
 
-        // Invitación (opcional, para el owner)
-        let invite = null;
-        try {
-          const channel = interaction.guild.channels.cache.find(
-            c =>
-              c.type === ChannelType.GuildText &&
-              c
-                .permissionsFor(interaction.guild.members.me)
-                .has(PermissionFlagsBits.CreateInstantInvite)
-          );
-          if (channel) invite = await channel.createInvite({ maxAge: 0, maxUses: 0 });
-        } catch (e) {
-          console.error("Error invitacion: " + e.message);
-        }
-
         const errores = log.filter(l => l.startsWith("Error"));
         const exitos = log.filter(l => !l.startsWith("Error"));
 
@@ -193,13 +178,7 @@ module.exports = {
               "Por motivos de **privacidad y seguridad**, el bot **ya no envía mensajes automáticos por DM a todos los miembros**.\n\n" +
               "Si quieres informar a la gente, puedo prepararte un mensaje de ejemplo para que lo publiques manualmente en un canal."
           )
-          .addFields(
-            {
-              name: "Invitación",
-              value: invite ? invite.url : "No se ha podido generar una invitación automática.",
-              inline: false
-            }
-          )
+
           .setTimestamp();
 
         const yesButton = new ButtonBuilder()
