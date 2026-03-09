@@ -28,7 +28,7 @@ module.exports = {
     const arrestoId = `ARR-${Date.now().toString(36).toUpperCase()}`;
 
     if (supabase) {
-      await supabase.from("erlc_sanciones").insert({
+      try { await supabase.from("erlc_sanciones").insert({
         id:          arrestoId,
         tipo:        "arresto",
         usuario_id:  usuario.id,
@@ -41,7 +41,7 @@ module.exports = {
         tiempo_min:  tiempo,
         evidencia,
         created_at:  new Date().toISOString(),
-      }).catch(() => {});
+      }); } catch(e) { console.error("[ERLC DB]", e.message); }
     }
 
     const embed = new EmbedBuilder()
