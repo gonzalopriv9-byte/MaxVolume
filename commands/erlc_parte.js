@@ -56,7 +56,7 @@ module.exports = {
     };
 
     if (supabase) {
-      await supabase.from("erlc_partes").insert({
+      try { await supabase.from("erlc_partes").insert({
         id:          parteId,
         tipo,
         oficial_id:  oficial.id,
@@ -68,7 +68,7 @@ module.exports = {
         resultado,
         evidencia,
         created_at:  new Date().toISOString(),
-      }).catch(() => {});
+      }); } catch(e) { console.error("[ERLC DB]", e.message); }
     }
 
     const embed = new EmbedBuilder()
