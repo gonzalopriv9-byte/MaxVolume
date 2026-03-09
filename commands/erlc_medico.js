@@ -49,7 +49,7 @@ module.exports = {
     };
 
     if (supabase) {
-      await supabase.from("erlc_informes_medicos").insert({
+      try { await supabase.from("erlc_informes_medicos").insert({
         id:          informeId,
         paciente_id: paciente.id,
         paciente_tag:paciente.tag,
@@ -61,7 +61,7 @@ module.exports = {
         estado,
         notas,
         created_at:  new Date().toISOString(),
-      }).catch(() => {});
+      }); } catch(e) { console.error("[ERLC DB]", e.message); }
     }
 
     const embed = new EmbedBuilder()
