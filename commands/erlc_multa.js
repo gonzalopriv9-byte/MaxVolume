@@ -27,7 +27,7 @@ module.exports = {
 
     // Guardar en Supabase
     if (supabase) {
-      await supabase.from("erlc_sanciones").insert({
+      try { await supabase.from("erlc_sanciones").insert({
         id:          multaId,
         tipo:        "multa",
         usuario_id:  usuario.id,
@@ -39,7 +39,7 @@ module.exports = {
         articulo,
         cantidad,
         created_at:  new Date().toISOString(),
-      }).catch(() => {});
+      }); } catch(e) { console.error("[ERLC DB]", e.message); }
     }
 
     const embed = new EmbedBuilder()
