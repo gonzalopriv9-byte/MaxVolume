@@ -342,7 +342,60 @@ client.once("ready", async () => {
 
 client.on("error", (error) => addLog("error", "Discord error: " + error.message));
 client.on("warn", (info) => addLog("warning", "Discord warning: " + info));
-client.on("guildCreate", (guild) => addLog("success", "Bot añadido a: " + guild.name));
+client.on("guildCreate", async (guild) => {
+  addLog("success", "Bot añadido a: " + guild.name);
+  try {
+    // Buscar el primer canal donde el bot pueda escribir
+    const canal = guild.channels.cache
+      .filter(c => c.type === 0 && c.permissionsFor(guild.members.me)?.has("SendMessages"))
+      .sort((a, b) => a.position - b.position)
+      .first();
+
+    if (!canal) return;
+
+    const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
+
+    const embed = new EmbedBuilder()
+      .setColor("#5865F2")
+      .setTitle(EMOJI.NEXALOGO + " ¡Hola! Soy **NexaBot** — Tu bot de protección y gestión")
+      .setDescription(
+        EMOJI.NUKE + " **Anti-Nuke** — Protección contra nukes, raids y bots maliciosos\n" +
+        EMOJI.CHECK + " **Verificación** — Sistema de verificación por correo electrónico\n" +
+        EMOJI.TICKET + " **Tickets** — Sistema de tickets con categorías y valoraciones\n" +
+        "🛡️ **Moderación** — Warns, bans globales, blacklist automática\n" +
+        "💼 **Trabajos** — Sistema de roles por trabajo con panel interactivo\n" +
+        "📊 **Niveles** — Sistema de experiencia y subida de rango\n" +
+        "🎉 **Sorteos** — Crea y gestiona sorteos con un comando\n" +
+        "📋 **Encuestas** — Votaciones con múltiples opciones\n" +
+        "💾 **Backup** — Copias de seguridad automáticas del servidor\n" +
+        EMOJI.CORREO + " **Anuncios** — Sistema de anuncios con menciones\n" +
+        "📈 **Logs** — Registro avanzado de eventos del servidor\n" +
+        "🤖 **IA integrada** — Menciónami para hacerme preguntas\n\n" +
+        "Usa **/setup** para configurar todo en minutos."
+      )
+      .setThumbnail(guild.client.user.displayAvatarURL({ size: 256 }))
+      .addFields(
+        { name: "📌 Servidor", value: guild.name, inline: true },
+        { name: "👥 Miembros", value: guild.memberCount.toString(), inline: true },
+        { name: "⚡ Comandos", value: "/setup, /help y más", inline: true }
+      )
+      .setFooter({ text: "NexaBot • Protección y gestión avanzada" })
+      .setTimestamp();
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setLabel("📖 Empezar con /setup")
+        .setStyle(ButtonStyle.Primary)
+        .setCustomId("noop_setup_hint")
+        .setDisabled(true)
+    );
+
+    await canal.send({ embeds: [embed], components: [row] });
+    addLog("success", "Mensaje de presentación enviado en: " + guild.name);
+  } catch (e) {
+    addLog("error", "Error mensaje presentación guildCreate: " + e.message);
+  }
+});
 client.on("guildDelete", (guild) => addLog("warning", "Bot removido de: " + guild.name));
 
 // ==================== ANTI-NUKE: AUDIT LOG EVENTS ====================
