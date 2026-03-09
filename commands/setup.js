@@ -58,7 +58,9 @@ module.exports = {
           option.setName('canal').setDescription('Canal de bienvenidas')
             .addChannelTypes(ChannelType.GuildText).setRequired(true))
         .addStringOption(option =>
-          option.setName('imagen').setDescription('URL imagen de fondo (opcional)').setRequired(false)))
+          option.setName('imagen').setDescription('URL imagen de fondo (opcional)').setRequired(false))
+      .addAttachmentOption(option =>
+        option.setName('imagen_archivo').setDescription('Sube directamente la imagen de fondo (PNG/JPG/GIF)').setRequired(false)))
 
     .addSubcommand(subcommand =>
       subcommand
@@ -195,19 +197,31 @@ module.exports = {
       // ==================== BIENVENIDA ====================
       if (subcommand === 'bienvenida') {
         const canal = interaction.options.getChannel('canal');
-        const imagen = interaction.options.getString('imagen') ||
-          'https://raw.githubusercontent.com/gonzalopriv9-byte/EspanoletesBOT.1/main/assets/ChatGPT_Image_13_feb_2026_19_27_59.webp';
+        const imagenUrl = interaction.options.getString('imagen') || null;
+        const imagenAdj = interaction.options.getAttachment('imagen_archivo') || null;
+
+        // Prioridad: adjunto > URL > imagen por defecto
+        let imageUrl = 'https://raw.githubusercontent.com/gonzalopriv9-byte/EspanoletesBOT.1/main/assets/ChatGPT_Image_13_feb_2026_19_27_59.webp';
+        if (imagenAdj) {
+          const validTypes = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+          if (!validTypes.includes(imagenAdj.contentType)) {
+            return interaction.editReply({ content: EMOJI.CRUZ + ' La imagen debe ser PNG, JPG, GIF o WEBP.' });
+          }
+          imageUrl = imagenAdj.url; // URL CDN de Discord — permanente mientras el archivo exista
+        } else if (imagenUrl) {
+          imageUrl = imagenUrl;
+        }
 
         await updateGuildConfig(guild.id, {
           welcome: {
             enabled: true,
             channelId: canal.id,
-            imageUrl: imagen
+            imageUrl
           }
         });
 
         return interaction.editReply({
-          content: EMOJI.CHECK + ' **Bienvenidas configuradas:**\n\nCanal: <#' + canal.id + '>\nImagen: ' + imagen.substring(0, 50) + '...'
+          content: EMOJI.CHECK + ' **Bienvenidas configuradas:**\n\nCanal: <#' + canal.id + '>\nImagen: ' + (imagenAdj ? 'Imagen subida ✅' : imageUrl.substring(0, 60) + '...')
         });
       }
 
