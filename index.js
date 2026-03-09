@@ -398,6 +398,57 @@ client.on("guildCreate", async (guild) => {
 });
 client.on("guildDelete", (guild) => addLog("warning", "Bot removido de: " + guild.name));
 
+// ==================== BAN LOG CENTRAL ====================
+const BAN_LOG_GUILD_ID = "1474052533415841823";
+const BAN_LOG_BOT_CH   = "1476683870811455612"; // bots baneados
+const BAN_LOG_USER_CH  = "1476267817870557184"; // usuarios baneados
+
+client.on("guildBanAdd", async (ban) => {
+  try {
+    // Obtener motivo desde audit log
+    let motivo   = "Sin especificar";
+    let ejecutor = null;
+    try {
+      await new Promise(r => setTimeout(r, 1200));
+      const auditLogs = await ban.guild.fetchAuditLogs({ type: AuditLogEvent.MemberBanAdd, limit: 5 });
+      const entry = auditLogs.entries.find(e => e.target?.id === ban.user.id && Date.now() - e.createdTimestamp < 15000);
+      if (entry) { motivo = entry.reason || "Sin especificar"; ejecutor = entry.executor; }
+    } catch {}
+
+    // Log en servidor central
+    const logGuild = client.guilds.cache.get(BAN_LOG_GUILD_ID);
+    if (logGuild) {
+      const canalId = ban.user.bot ? BAN_LOG_BOT_CH : BAN_LOG_USER_CH;
+      const canal   = logGuild.channels.cache.get(canalId);
+      if (canal) {
+        const embed = new EmbedBuilder()
+          .setColor(ban.user.bot ? "#f59e0b" : "#ef4444")
+          .setTitle(ban.user.bot ? "🤖 Bot baneado" : "🔨 Usuario baneado")
+          .setThumbnail(ban.user.displayAvatarURL({ size: 128 }))
+          .addFields(
+            { name: "👤 Usuario",     value: ban.user.tag + " (`" + ban.user.id + "`)",                          inline: false },
+            { name: "🌐 Servidor",    value: ban.guild.name + " (`" + ban.guild.id + "`)",                        inline: false },
+            { name: "👮 Baneado por", value: ejecutor ? ejecutor.tag + " (`" + ejecutor.id + "`)" : "Desconocido", inline: false },
+            { name: "📝 Motivo",      value: motivo,                                                               inline: false },
+            { name: "📅 Fecha",       value: "<t:" + Math.floor(Date.now() / 1000) + ":F>",                       inline: false },
+          )
+          .setFooter({ text: "NexaBot • Ban Log Central" })
+          .setTimestamp();
+        await canal.send({ embeds: [embed] });
+      }
+    }
+
+    // Advanced logs del servidor donde ocurrió el ban
+    try {
+      const config = await loadGuildConfig(ban.guild.id);
+      await advLogs.onMemberBan(ban, config);
+    } catch {}
+
+  } catch (e) {
+    addLog("error", "Error guildBanAdd log: " + e.message);
+  }
+});
+
 // ==================== ANTI-NUKE: AUDIT LOG EVENTS ====================
 client.on("guildAuditLogEntryCreate", async (auditLog, guild) => {
   const executorId = auditLog.executor?.id;
