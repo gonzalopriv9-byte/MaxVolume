@@ -70,7 +70,6 @@ async function playNext(guildId) {
   try {
     console.log(`[Musica] Iniciando: ${track.url}`);
 
-    // yt-dlp: descarga mejor audio y lo saca por stdout
     const ytdlpArgs = [
       "-f", "bestaudio",
       "--no-playlist",
@@ -90,17 +89,15 @@ async function playNext(guildId) {
       playNext(guildId);
     });
 
-    // ffmpeg: convierte cualquier formato a PCM s16le que @discordjs/voice entiende nativamente
     const ffmpeg = spawn(FFMPEG, [
-      "-i", "pipe:0",          // stdin = stream de yt-dlp
-      "-f", "s16le",           // PCM signed 16-bit little-endian
-      "-ar", "48000",          // 48kHz (Discord)
-      "-ac", "2",              // stereo
-      "-loglevel", "error",    // solo errores
-      "pipe:1",                // stdout = audio procesado
+      "-i", "pipe:0",
+      "-f", "s16le",
+      "-ar", "48000",
+      "-ac", "2",
+      "-loglevel", "error",
+      "pipe:1",
     ], { stdio: ["pipe", "pipe", "pipe"] });
 
-    // Conectar yt-dlp -> ffmpeg
     ytdlp.stdout.pipe(ffmpeg.stdin);
     ffmpeg.stderr.on("data", d => console.error("[ffmpeg]", d.toString().trim()));
     ffmpeg.on("error", err => {
@@ -109,9 +106,8 @@ async function playNext(guildId) {
       playNext(guildId);
     });
 
-    // Crear recurso de audio desde stdout de ffmpeg
     const resource = createAudioResource(ffmpeg.stdout, {
-      inputType: StreamType.Raw,   // PCM raw = StreamType.Raw
+      inputType: StreamType.Raw,
       inlineVolume: true,
     });
 
@@ -147,6 +143,8 @@ async function addToQueue(guildId, voiceChannel, textChannel, track) {
       channelId: voiceChannel.id,
       guildId,
       adapterCreator: voiceChannel.guild.voiceAdapterCreator,
+      selfDeaf: false,   // <-- evita que el bot se ensordezca a si mismo
+      selfMute: false,
     });
     const player = createAudioPlayer();
     connection.subscribe(player);
