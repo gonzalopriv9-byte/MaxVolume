@@ -301,12 +301,12 @@ client.once("ready", async () => {
 
   addLog("success", "Sistema de backup automático inicializado");
 
-  // ── MÚSICA: inicializar DisTube ───────────────────────
+  // ── MÚSICA: inicializar discord-player ───────────────
   try {
-    const { setupDistube } = require("./commands/musica");
-    setupDistube(client);
+    const { setupPlayer } = require("./commands/musica");
+    await setupPlayer(client);
   } catch (e) {
-    addLog("warning", "DisTube no disponible: " + e.message);
+    addLog("warning", "discord-player no disponible: " + e.message);
   }
   addLog("success", "Sistema de protección anti-nuke inicializado");
   addLog("info", "Sistema de comandos terminal activado - Escribe /changestatus [TEXTO] para cambiar el estado");
