@@ -1,11 +1,4 @@
 // commands/musica.js
-// Sistema de música completo usando DisTube
-// Instalar: npm install distube @distube/yt-dlp
-//
-// En index.js añadir (una vez, en el ready o antes del login):
-//   const { setupDistube } = require('./commands/musica');
-//   setupDistube(client);
-
 const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } = require("discord.js");
 
 const EMOJI = {
@@ -15,23 +8,24 @@ const EMOJI = {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Setup DisTube (llamar una vez desde index.js)
+// Setup DisTube v5 (llamar una vez desde index.js)
 // ─────────────────────────────────────────────────────────────
 function setupDistube(client) {
-  let DisTube;
+  let DisTube, YtDlpPlugin, RepeatMode;
   try {
-    DisTube = require("distube").DisTube;
-  } catch {
-    console.error("❌ DisTube no instalado. Ejecuta: npm install distube @distube/yt-dlp");
+    ({ DisTube, RepeatMode } = require("distube"));
+    ({ YtDlpPlugin } = require("@distube/yt-dlp"));
+  } catch (e) {
+    console.error("❌ DisTube no instalado:", e.message);
     return;
   }
 
   const distube = new DisTube(client, {
-    emitNewSongOnly: true,
-    joinNewVoiceChannel: true,
+    plugins: [new YtDlpPlugin()],
   });
 
   client.distube = distube;
+  client.RepeatMode = RepeatMode;
 
   const color = "#5865F2";
 
@@ -44,7 +38,7 @@ function setupDistube(client) {
         .setThumbnail(song.thumbnail)
         .addFields(
           { name: "⏱ Duración",    value: song.formattedDuration, inline: true },
-          { name: "👤 Solicitado", value: song.user?.toString() || "—", inline: true },
+          { name: "👤 Solicitado", value: song.member?.toString() || "—", inline: true },
         )
         .setFooter({ text: "NexaBot Music" })
       ]
@@ -66,28 +60,12 @@ function setupDistube(client) {
     queue.textChannel?.send({ content: "⏹ Cola terminada. ¡Hasta la próxima!" }).catch(() => {});
   });
 
-  distube.on("error", (channel, e) => {
-    channel?.send({ content: `❌ Error: ${e.message}` }).catch(() => {});
-    console.error("[DisTube]", e);
+  distube.on("error", (error, queue) => {
+    queue?.textChannel?.send({ content: `❌ Error: ${error.message}` }).catch(() => {});
+    console.error("[DisTube]", error);
   });
 
-  console.log("✅ DisTube inicializado");
-}
-
-// ─────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────
-function getDistube(interaction) {
-  return interaction.client.distube;
-}
-
-function checkVoice(interaction) {
-  const vc = interaction.member.voice.channel;
-  if (!vc) {
-    interaction.reply({ content: EMOJI.CRUZ + " Debes estar en un canal de voz.", ephemeral: true });
-    return null;
-  }
-  return vc;
+  console.log("✅ DisTube v5 inicializado");
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -126,7 +104,7 @@ module.exports = {
     ),
 
   async execute(interaction) {
-    const distube = getDistube(interaction);
+    const distube = interaction.client.distube;
     if (!distube) {
       return interaction.reply({ content: EMOJI.CRUZ + " Sistema de música no disponible.", ephemeral: true });
     }
@@ -135,14 +113,14 @@ module.exports = {
 
     // PLAY
     if (sub === "play") {
-      const vc = checkVoice(interaction); if (!vc) return;
+      const vc = interaction.member.voice.channel;
+      if (!vc) return interaction.reply({ content: EMOJI.CRUZ + " Debes estar en un canal de voz.", ephemeral: true });
       const busqueda = interaction.options.getString("busqueda");
       await interaction.deferReply();
       try {
         await distube.play(vc, busqueda, {
           member:      interaction.member,
           textChannel: interaction.channel,
-          message:     interaction,
         });
         await interaction.editReply({ content: EMOJI.CHECK + " Buscando **" + busqueda + "**..." });
       } catch (e) {
@@ -151,41 +129,16 @@ module.exports = {
       return;
     }
 
-    const queue = distube.getQueue(interaction.guild);
+    const queue = distube.getQueue(interaction.guildId);
 
-    // PAUSE
-    if (sub === "pause") {
-      if (!queue) return interaction.reply({ content: EMOJI.CRUZ + " No hay música reproduciéndose.", ephemeral: true });
-      distube.pause(interaction.guild);
-      return interaction.reply({ content: "⏸ Música pausada." });
-    }
+    if (!queue) return interaction.reply({ content: EMOJI.CRUZ + " No hay música reproduciéndose.", ephemeral: true });
 
-    // RESUME
-    if (sub === "resume") {
-      if (!queue) return interaction.reply({ content: EMOJI.CRUZ + " No hay música en cola.", ephemeral: true });
-      distube.resume(interaction.guild);
-      return interaction.reply({ content: "▶️ Música reanudada." });
-    }
+    if (sub === "pause")  { queue.pause();  return interaction.reply({ content: "⏸ Música pausada." }); }
+    if (sub === "resume") { queue.resume(); return interaction.reply({ content: "▶️ Música reanudada." }); }
+    if (sub === "skip")   { await queue.skip(); return interaction.reply({ content: "⏭ Canción saltada." }); }
+    if (sub === "stop")   { await queue.stop(); return interaction.reply({ content: "⏹ Música detenida y cola vaciada." }); }
 
-    // SKIP
-    if (sub === "skip") {
-      if (!queue) return interaction.reply({ content: EMOJI.CRUZ + " No hay música reproduciéndose.", ephemeral: true });
-      await distube.skip(interaction.guild);
-      return interaction.reply({ content: "⏭ Canción saltada." });
-    }
-
-    // STOP
-    if (sub === "stop") {
-      if (!queue) return interaction.reply({ content: EMOJI.CRUZ + " No hay música reproduciéndose.", ephemeral: true });
-      await distube.stop(interaction.guild);
-      return interaction.reply({ content: "⏹ Música detenida y cola vaciada." });
-    }
-
-    // COLA
     if (sub === "cola") {
-      if (!queue || !queue.songs.length) {
-        return interaction.reply({ content: "📭 La cola está vacía.", ephemeral: true });
-      }
       const lista = queue.songs
         .slice(0, 10)
         .map((s, i) => `${i === 0 ? "▶️" : `${i}.`} **${s.name}** — ${s.formattedDuration}`)
@@ -200,19 +153,16 @@ module.exports = {
       });
     }
 
-    // VOLUMEN
     if (sub === "volumen") {
-      if (!queue) return interaction.reply({ content: EMOJI.CRUZ + " No hay música reproduciéndose.", ephemeral: true });
       const nivel = interaction.options.getInteger("nivel");
-      distube.setVolume(interaction.guild, nivel);
+      queue.setVolume(nivel);
       return interaction.reply({ content: `🔊 Volumen establecido a **${nivel}%**` });
     }
 
-    // LOOP
     if (sub === "loop") {
-      if (!queue) return interaction.reply({ content: EMOJI.CRUZ + " No hay música reproduciéndose.", ephemeral: true });
+      const RepeatMode = interaction.client.RepeatMode;
       const modo = parseInt(interaction.options.getString("modo"));
-      distube.setRepeatMode(interaction.guild, modo);
+      queue.setRepeatMode(modo);
       const modos = ["🚫 Sin loop", "🔂 Repitiendo canción", "🔁 Repitiendo cola"];
       return interaction.reply({ content: `Modo de repetición: **${modos[modo]}**` });
     }
