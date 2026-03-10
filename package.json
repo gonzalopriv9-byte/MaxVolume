@@ -18,6 +18,6 @@
     "pg": "^8.13.0",
     "@supabase/supabase-js": "^2.45.0",
     "distube": "^4.2.4",
-    "@distube/yt-dlp": "^1.2.3"
+    "@distube/yt-dlp": "^2.0.1"
   }
 }
