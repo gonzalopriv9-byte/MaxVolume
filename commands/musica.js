@@ -1,4 +1,4 @@
-// commands/musica.js — yt-dlp (stream) + play-dl (search) + @discordjs/voice
+// commands/musica.js - yt-dlp | ffmpeg | @discordjs/voice
 // Compatible con Node v20, Raspberry Pi ARM
 
 const { SlashCommandBuilder, EmbedBuilder } = require("discord.js");
@@ -21,7 +21,6 @@ const EMOJI = {
   NEXALOGO: "<a:NEXALOGO:1477286399345561682>",
 };
 
-// Convierte Netscape cookies.txt a string HTTP para play-dl
 function parseCookiesTxt(filePath) {
   return fs.readFileSync(filePath, "utf8")
     .split("\n")
@@ -36,7 +35,6 @@ function parseCookiesTxt(filePath) {
     .join("; ");
 }
 
-// Inicializar play-dl con cookies (solo para busquedas)
 const playdl = require("play-dl");
 (async () => {
   try {
@@ -50,20 +48,17 @@ const playdl = require("play-dl");
   }
 })();
 
-// Ruta al binario yt-dlp
 const YTDLP = process.env.YTDLP_PATH || "yt-dlp";
-
-// Ruta al archivo de cookies para yt-dlp
+const FFMPEG = process.env.FFMPEG_PATH || "ffmpeg";
 const COOKIES_FILE = path.join(__dirname, "../youtube.com_cookies.txt");
 
-// Cola por guild
 const queues = new Map();
 function getQueue(guildId) { return queues.get(guildId); }
 
 async function playNext(guildId) {
   const q = queues.get(guildId);
   if (!q || q.queue.length === 0) {
-    q?.textChannel?.send({ content: "Terminada la cola." }).catch(() => {});
+    q?.textChannel?.send({ content: "Cola terminada." }).catch(() => {});
     q?.connection?.destroy();
     queues.delete(guildId);
     return;
@@ -73,39 +68,50 @@ async function playNext(guildId) {
   q.current = track;
 
   try {
-    console.log(`[Musica] yt-dlp stream: ${track.url}`);
+    console.log(`[Musica] Iniciando: ${track.url}`);
 
-    const args = [
+    // yt-dlp: descarga mejor audio y lo saca por stdout
+    const ytdlpArgs = [
       "-f", "bestaudio",
       "--no-playlist",
       "-o", "-",
+      "--quiet",
     ];
-
     if (fs.existsSync(COOKIES_FILE)) {
-      args.push("--cookies", COOKIES_FILE);
+      ytdlpArgs.push("--cookies", COOKIES_FILE);
     }
+    ytdlpArgs.push(track.url);
 
-    args.push(track.url);
-
-    const ytdlp = spawn(YTDLP, args, {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    ytdlp.stderr.on("data", (data) => {
-      const msg = data.toString();
-      if (msg.toLowerCase().includes("error") || msg.toLowerCase().includes("warning")) {
-        console.error("[Musica] yt-dlp stderr:", msg.trim());
-      }
-    });
-
-    ytdlp.on("error", (err) => {
-      console.error("[Musica] yt-dlp spawn error:", err.message);
+    const ytdlp = spawn(YTDLP, ytdlpArgs, { stdio: ["ignore", "pipe", "pipe"] });
+    ytdlp.stderr.on("data", d => console.error("[yt-dlp]", d.toString().trim()));
+    ytdlp.on("error", err => {
+      console.error("[Musica] yt-dlp error:", err.message);
       q?.textChannel?.send({ content: EMOJI.CRUZ + " Error yt-dlp: " + err.message }).catch(() => {});
       playNext(guildId);
     });
 
-    const resource = createAudioResource(ytdlp.stdout, {
-      inputType: StreamType.Arbitrary,
+    // ffmpeg: convierte cualquier formato a PCM s16le que @discordjs/voice entiende nativamente
+    const ffmpeg = spawn(FFMPEG, [
+      "-i", "pipe:0",          // stdin = stream de yt-dlp
+      "-f", "s16le",           // PCM signed 16-bit little-endian
+      "-ar", "48000",          // 48kHz (Discord)
+      "-ac", "2",              // stereo
+      "-loglevel", "error",    // solo errores
+      "pipe:1",                // stdout = audio procesado
+    ], { stdio: ["pipe", "pipe", "pipe"] });
+
+    // Conectar yt-dlp -> ffmpeg
+    ytdlp.stdout.pipe(ffmpeg.stdin);
+    ffmpeg.stderr.on("data", d => console.error("[ffmpeg]", d.toString().trim()));
+    ffmpeg.on("error", err => {
+      console.error("[Musica] ffmpeg error:", err.message);
+      q?.textChannel?.send({ content: EMOJI.CRUZ + " Error ffmpeg: " + err.message }).catch(() => {});
+      playNext(guildId);
+    });
+
+    // Crear recurso de audio desde stdout de ffmpeg
+    const resource = createAudioResource(ffmpeg.stdout, {
+      inputType: StreamType.Raw,   // PCM raw = StreamType.Raw
       inlineVolume: true,
     });
 
@@ -119,7 +125,7 @@ async function playNext(guildId) {
         .setDescription(`**[${track.title}](${track.url})**`)
         .setThumbnail(track.thumbnail || null)
         .addFields(
-          { name: "Duracion",   value: track.duration || "?",    inline: true },
+          { name: "Duracion",   value: track.duration || "?",  inline: true },
           { name: "Solicitado", value: track.requestedBy || "-", inline: true },
         )
         .setFooter({ text: "NexaBot Music" })
@@ -177,7 +183,6 @@ async function addToQueue(guildId, voiceChannel, textChannel, track) {
   }
 }
 
-// Obtener info de una URL de YouTube usando yt-dlp (sin descargar)
 async function getInfoYtdlp(url) {
   return new Promise((resolve, reject) => {
     const args = ["--dump-json", "--no-playlist"];
@@ -196,12 +201,8 @@ async function getInfoYtdlp(url) {
     proc.on("error", reject);
     proc.on("close", code => {
       if (code !== 0) return reject(new Error("yt-dlp info fallo con codigo " + code));
-      try {
-        const info = JSON.parse(data);
-        resolve(info);
-      } catch (e) {
-        reject(new Error("yt-dlp JSON invalido: " + e.message));
-      }
+      try { resolve(JSON.parse(data)); }
+      catch (e) { reject(new Error("yt-dlp JSON invalido: " + e.message)); }
     });
   });
 }
@@ -242,7 +243,6 @@ module.exports = {
         let trackInfo;
 
         if (busqueda.includes("youtube.com") || busqueda.includes("youtu.be")) {
-          // URL directa - obtener info con yt-dlp
           const info = await getInfoYtdlp(busqueda);
           const dur = info.duration ? new Date(info.duration * 1000).toISOString().substr(11, 8).replace(/^00:/, "") : "?";
           trackInfo = {
@@ -253,14 +253,12 @@ module.exports = {
             requestedBy: interaction.user.toString(),
           };
         } else {
-          // Busqueda por texto - usar play-dl para encontrar el video
           const results = await playdl.search(busqueda, { limit: 1, source: { youtube: "video" } });
           if (!results.length) return interaction.editReply({ content: EMOJI.CRUZ + " No se encontro ningun resultado." });
           const v = results[0];
-          const cleanUrl = `https://www.youtube.com/watch?v=${v.id}`;
           trackInfo = {
             title:       v.title,
-            url:         cleanUrl,
+            url:         `https://www.youtube.com/watch?v=${v.id}`,
             duration:    v.durationRaw,
             thumbnail:   v.thumbnails?.[0]?.url,
             requestedBy: interaction.user.toString(),
