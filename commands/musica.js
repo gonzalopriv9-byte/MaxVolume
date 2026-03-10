@@ -9,14 +9,35 @@ const {
   AudioPlayerStatus,
   VoiceConnectionStatus,
   entersState,
-  StreamType,
 } = require("@discordjs/voice");
+const path = require("path");
+const fs = require("fs");
 
 const EMOJI = {
   CHECK:    "<a:Tick:1480638398816456848>",
   CRUZ:     "<a:CruzRoja:1480947488960806943>",
   NEXALOGO: "<a:NEXALOGO:1477286399345561682>",
 };
+
+// Inicializar play-dl con cookies de YouTube al arrancar
+const playdl = require("play-dl");
+(async () => {
+  try {
+    const cookiesPath = path.join(__dirname, "../youtube.com_cookies.txt");
+    if (fs.existsSync(cookiesPath)) {
+      await playdl.setToken({
+        youtube: {
+          cookie: fs.readFileSync(cookiesPath, "utf8"),
+        },
+      });
+      console.log("[Música] Cookies de YouTube cargadas correctamente.");
+    } else {
+      console.warn("[Música] No se encontró youtube.com_cookies.txt — YouTube puede bloquear requests.");
+    }
+  } catch (e) {
+    console.error("[Música] Error cargando cookies:", e.message);
+  }
+})();
 
 // Cola por guild: Map<guildId, { connection, player, queue: [], current, textChannel, volume }>
 const queues = new Map();
@@ -36,7 +57,6 @@ async function playNext(guildId) {
   q.current = track;
 
   try {
-    const playdl = require("play-dl");
     const stream = await playdl.stream(track.url, { quality: 2 });
     const resource = createAudioResource(stream.stream, {
       inputType: stream.type,
@@ -111,7 +131,7 @@ async function addToQueue(guildId, voiceChannel, textChannel, track) {
 }
 
 module.exports = {
-  setupPlayer: async () => {}, // compatibilidad con index.js (no hace nada, no se necesita init)
+  setupPlayer: async () => {},
 
   data: new SlashCommandBuilder()
     .setName("musica")
@@ -143,10 +163,7 @@ module.exports = {
       const busqueda = interaction.options.getString("busqueda");
 
       try {
-        const playdl = require("play-dl");
-
         let trackInfo;
-        // URL directa de YouTube
         if (busqueda.includes("youtube.com") || busqueda.includes("youtu.be")) {
           const info = await playdl.video_info(busqueda);
           trackInfo = {
@@ -157,7 +174,6 @@ module.exports = {
             requestedBy: interaction.user.toString(),
           };
         } else {
-          // Búsqueda por nombre
           const results = await playdl.search(busqueda, { limit: 1, source: { youtube: "video" } });
           if (!results.length) return interaction.editReply({ content: EMOJI.CRUZ + " No se encontró ningún resultado." });
           const v = results[0];
@@ -191,7 +207,7 @@ module.exports = {
       return interaction.reply({ content: "▶️ Música reanudada." });
     }
     if (sub === "skip") {
-      q.player.stop(); // dispara Idle → playNext
+      q.player.stop();
       return interaction.reply({ content: "⏭ Canción saltada." });
     }
     if (sub === "stop") {
@@ -218,7 +234,6 @@ module.exports = {
     if (sub === "volumen") {
       const nivel = interaction.options.getInteger("nivel");
       q.volume = nivel;
-      // Aplicar al stream actual si existe
       try {
         const resource = q.player.state?.resource;
         resource?.volume?.setVolume(nivel / 100);
