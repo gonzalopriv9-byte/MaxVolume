@@ -103,12 +103,13 @@ const verificationCodes = new Map();
 
 // ==================== EMOJIS ====================
 const EMOJI = {
-   TICKET: "<a:Ticket:1472541437470965942>",  
-  CRUZ: "<a:Cruz:1472540885102235689>",
-  CHECK: "<a:Check:1472540340584972509>",
-  CORREO: "<a:correo:1472550293152596000>",
-   NUKE: "<a:NUKE:1477617312679858318>",
- NEXALOGO: "<a:NEXALOGO:1477286399345561682>"
+  TICKET:      "<a:Ticket:1472541437470965942>",
+  CRUZ:        "<a:CruzRoja:1480947488960806943>",
+  CHECK:       "<a:Tick:1480638398816456848>",
+  CORREO:      "<a:correo:1472550293152596000>",
+  NUKE:        "<a:NUKE:1477617312679858318>",
+  ADVERTENCIA: "<a:ADVERTENCIA:1477616948937490452>",
+  NEXALOGO:    "<a:NEXALOGO:1477286399345561682>",
 };
 
 // ==================== SENDGRID ====================
@@ -299,6 +300,14 @@ client.once("ready", async () => {
   }, 60000);
 
   addLog("success", "Sistema de backup automático inicializado");
+
+  // ── MÚSICA: inicializar DisTube ───────────────────────
+  try {
+    const { setupDistube } = require("./commands/musica");
+    setupDistube(client);
+  } catch (e) {
+    addLog("warning", "DisTube no disponible: " + e.message);
+  }
   addLog("success", "Sistema de protección anti-nuke inicializado");
   addLog("info", "Sistema de comandos terminal activado - Escribe /changestatus [TEXTO] para cambiar el estado");
 
@@ -403,7 +412,15 @@ const BAN_LOG_GUILD_ID = "1474052533415841823";
 const BAN_LOG_BOT_CH   = "1476683870811455612"; // bots baneados
 const BAN_LOG_USER_CH  = "1476267817870557184"; // usuarios baneados
 
+// Anti-duplicados: evitar procesar el mismo ban dos veces
+const processedBans = new Set();
+
 client.on("guildBanAdd", async (ban) => {
+  const banKey = ban.guild.id + ":" + ban.user.id;
+  if (processedBans.has(banKey)) return;
+  processedBans.add(banKey);
+  setTimeout(() => processedBans.delete(banKey), 10000);
+
   try {
     // Obtener motivo desde audit log
     let motivo   = "Sin especificar";
@@ -426,23 +443,17 @@ client.on("guildBanAdd", async (ban) => {
           .setTitle(ban.user.bot ? "🤖 Bot baneado" : "🔨 Usuario baneado")
           .setThumbnail(ban.user.displayAvatarURL({ size: 128 }))
           .addFields(
-            { name: "👤 Usuario",     value: ban.user.tag + " (`" + ban.user.id + "`)",                          inline: false },
-            { name: "🌐 Servidor",    value: ban.guild.name + " (`" + ban.guild.id + "`)",                        inline: false },
+            { name: "👤 Usuario",     value: ban.user.tag + " (`" + ban.user.id + "`)",                           inline: false },
+            { name: "🌐 Servidor",    value: ban.guild.name + " (`" + ban.guild.id + "`)",                         inline: false },
             { name: "👮 Baneado por", value: ejecutor ? ejecutor.tag + " (`" + ejecutor.id + "`)" : "Desconocido", inline: false },
-            { name: "📝 Motivo",      value: motivo,                                                               inline: false },
-            { name: "📅 Fecha",       value: "<t:" + Math.floor(Date.now() / 1000) + ":F>",                       inline: false },
+            { name: "📝 Motivo",      value: motivo,                                                                inline: false },
+            { name: "📅 Fecha",       value: "<t:" + Math.floor(Date.now() / 1000) + ":F>",                        inline: false },
           )
           .setFooter({ text: "NexaBot • Ban Log Central" })
           .setTimestamp();
         await canal.send({ embeds: [embed] });
       }
     }
-
-    // Advanced logs del servidor donde ocurrió el ban
-    try {
-      const config = await loadGuildConfig(ban.guild.id);
-      await advLogs.onMemberBan(ban, config);
-    } catch {}
 
   } catch (e) {
     addLog("error", "Error guildBanAdd log: " + e.message);
@@ -1243,6 +1254,18 @@ client.on("messageCreate", async (message) => {
       activeAIProcessing.set(message.id, true);
 
       try {
+        // Check premium: personal del usuario o elite del servidor
+        const { getGuildTier, getUserTier } = require("./utils/premiumManager");
+        const [gTier, uTier] = await Promise.all([
+          getGuildTier(message.guild.id),
+          getUserTier(message.author.id),
+        ]);
+        const hasAI = gTier === "elite" || uTier === "personal" || uTier === "elite";
+        if (!hasAI) {
+          activeAIProcessing.delete(message.id);
+          return message.reply(EMOJI.ADVERTENCIA + " La IA requiere plan **Elite** del servidor o **Premium Personal**. Usa `/premium` para más info.");
+        }
+
         const prompt = message.content.replace(/<@!?\d+>/g, "").trim();
         if (!prompt) { activeAIProcessing.delete(message.id); return message.reply("Menciónami con una pregunta."); }
 
@@ -1254,7 +1277,11 @@ client.on("messageCreate", async (message) => {
           body: JSON.stringify({
             model: "llama-3.3-70b-versatile",
             messages: [
-              { role: "system", content: "Eres NexaBot, un asistente de seguridad y moderación de servidores Discord desarrollado por gonzalo_priv. Tu personalidad es profesional pero amigable. Ayudas a administradores y usuarios con funciones de protección anti-nuke, tickets, verificación por email, DNI virtuales, blacklist global y backup automático. Respondes de forma clara, concisa y útil. Cuando te pregunten sobre tus funcionalidades, menciona: sistema anti-nuke, tickets personalizables, verificación por correo, DNI virtuales, sistema de trabajos con roles, blacklist automática, protección anti-flood/spam/links y backups automáticos. Eres eficiente, confiable y siempre dispuesto a ayudar." },
+              { role: "system", content: await (async () => {
+              const gCfg = await loadGuildConfig(message.guild.id).catch(() => null);
+              return gCfg?.ai?.customPrompt ||
+                "Eres NexaBot, un asistente de seguridad y moderación de servidores Discord desarrollado por gonzalo_priv. Tu personalidad es profesional pero amigable. Ayudas a administradores y usuarios con funciones de protección anti-nuke, tickets, verificación por email, DNI virtuales, blacklist global y backup automático. Respondes de forma clara, concisa y útil. Cuando te pregunten sobre tus funcionalidades, menciona: sistema anti-nuke, tickets personalizables, verificación por correo, DNI virtuales, sistema de trabajos con roles, blacklist automática, protección anti-flood/spam/links y backups automáticos. Eres eficiente, confiable y siempre dispuesto a ayudar.";
+            })() },
               { role: "user", content: prompt }
             ],
             max_tokens: 1024,
