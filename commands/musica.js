@@ -71,7 +71,9 @@ async function playNext(guildId) {
     console.log(`[Musica] Iniciando: ${track.url}`);
 
     const ytdlpArgs = [
-      "-f", "bestaudio",
+      // Usar cliente tv para evitar SABR streaming
+      "--extractor-args", "youtube:player_client=tv",
+      "-f", "bestaudio/best",
       "--no-playlist",
       "-o", "-",
       "--quiet",
@@ -143,7 +145,7 @@ async function addToQueue(guildId, voiceChannel, textChannel, track) {
       channelId: voiceChannel.id,
       guildId,
       adapterCreator: voiceChannel.guild.voiceAdapterCreator,
-      selfDeaf: false,   // <-- evita que el bot se ensordezca a si mismo
+      selfDeaf: false,
       selfMute: false,
     });
     const player = createAudioPlayer();
@@ -183,7 +185,11 @@ async function addToQueue(guildId, voiceChannel, textChannel, track) {
 
 async function getInfoYtdlp(url) {
   return new Promise((resolve, reject) => {
-    const args = ["--dump-json", "--no-playlist"];
+    const args = [
+      "--extractor-args", "youtube:player_client=tv",
+      "--dump-json",
+      "--no-playlist",
+    ];
     if (fs.existsSync(COOKIES_FILE)) {
       args.push("--cookies", COOKIES_FILE);
     }
