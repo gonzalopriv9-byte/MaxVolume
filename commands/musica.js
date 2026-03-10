@@ -19,15 +19,34 @@ const EMOJI = {
   NEXALOGO: "<a:NEXALOGO:1477286399345561682>",
 };
 
+// Convierte formato Netscape cookies.txt → string HTTP (NAME=val; NAME2=val2)
+function parseCookiesTxt(filePath) {
+  const raw = fs.readFileSync(filePath, "utf8");
+  return raw
+    .split("\n")
+    .filter(line => line && !line.startsWith("#"))
+    .map(line => {
+      const parts = line.split("\t");
+      if (parts.length < 7) return null;
+      const name = parts[5].trim();
+      const value = parts[6].trim();
+      if (!name || !value) return null;
+      return `${name}=${value}`;
+    })
+    .filter(Boolean)
+    .join("; ");
+}
+
 // Inicializar play-dl con cookies de YouTube al arrancar
 const playdl = require("play-dl");
 (async () => {
   try {
     const cookiesPath = path.join(__dirname, "../youtube.com_cookies.txt");
     if (fs.existsSync(cookiesPath)) {
+      const cookieString = parseCookiesTxt(cookiesPath);
       await playdl.setToken({
         youtube: {
-          cookie: fs.readFileSync(cookiesPath, "utf8"),
+          cookie: cookieString,
         },
       });
       console.log("[Música] Cookies de YouTube cargadas correctamente.");
