@@ -1,5 +1,7 @@
 // commands/musica.js
-const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } = require("discord.js");
+// Sistema de música con discord-player v6 (compatible Node v20)
+
+const { SlashCommandBuilder, EmbedBuilder } = require("discord.js");
 
 const EMOJI = {
   CHECK:    "<a:Tick:1480638398816456848>",
@@ -7,72 +9,61 @@ const EMOJI = {
   NEXALOGO: "<a:NEXALOGO:1477286399345561682>",
 };
 
-// ─────────────────────────────────────────────────────────────
-// Setup DisTube v5 (llamar una vez desde index.js)
-// ─────────────────────────────────────────────────────────────
-function setupDistube(client) {
-  let DisTube, YtDlpPlugin, RepeatMode;
+async function setupPlayer(client) {
+  let Player, DefaultExtractors;
   try {
-    ({ DisTube, RepeatMode } = require("distube"));
-    ({ YtDlpPlugin } = require("@distube/yt-dlp"));
+    ({ Player } = require("discord-player"));
+    ({ DefaultExtractors } = require("@discord-player/extractor"));
   } catch (e) {
-    console.error("❌ DisTube no instalado:", e.message);
+    console.error("❌ discord-player no instalado:", e.message);
     return;
   }
 
-  const distube = new DisTube(client, {
-    plugins: [new YtDlpPlugin()],
-  });
+  const player = new Player(client);
+  await player.extractors.loadMulti(DefaultExtractors);
+  client.musicPlayer = player;
 
-  client.distube = distube;
-  client.RepeatMode = RepeatMode;
-
-  const color = "#5865F2";
-
-  distube.on("playSong", (queue, song) => {
-    queue.textChannel?.send({
+  player.events.on("playerStart", (queue, track) => {
+    queue.metadata?.channel?.send({
       embeds: [new EmbedBuilder()
-        .setColor(color)
+        .setColor("#5865F2")
         .setTitle("🎵 Reproduciendo ahora")
-        .setDescription(`**[${song.name}](${song.url})**`)
-        .setThumbnail(song.thumbnail)
+        .setDescription(`**[${track.title}](${track.url})**`)
+        .setThumbnail(track.thumbnail)
         .addFields(
-          { name: "⏱ Duración",    value: song.formattedDuration, inline: true },
-          { name: "👤 Solicitado", value: song.member?.toString() || "—", inline: true },
+          { name: "⏱ Duración",    value: track.duration,                    inline: true },
+          { name: "👤 Solicitado", value: track.requestedBy?.toString() || "—", inline: true },
         )
         .setFooter({ text: "NexaBot Music" })
       ]
     }).catch(() => {});
   });
 
-  distube.on("addSong", (queue, song) => {
-    queue.textChannel?.send({
+  player.events.on("audioTrackAdd", (queue, track) => {
+    queue.metadata?.channel?.send({
       embeds: [new EmbedBuilder()
-        .setColor(color)
+        .setColor("#5865F2")
         .setTitle("➕ Añadido a la cola")
-        .setDescription(`**${song.name}** — ${song.formattedDuration}`)
-        .setFooter({ text: "Posición en cola: " + queue.songs.length })
+        .setDescription(`**${track.title}** — ${track.duration}`)
+        .setFooter({ text: "Posición: " + queue.tracks.size })
       ]
     }).catch(() => {});
   });
 
-  distube.on("finish", queue => {
-    queue.textChannel?.send({ content: "⏹ Cola terminada. ¡Hasta la próxima!" }).catch(() => {});
+  player.events.on("emptyQueue", queue => {
+    queue.metadata?.channel?.send({ content: "⏹ Cola terminada. ¡Hasta la próxima!" }).catch(() => {});
   });
 
-  distube.on("error", (error, queue) => {
-    queue?.textChannel?.send({ content: `❌ Error: ${error.message}` }).catch(() => {});
-    console.error("[DisTube]", error);
+  player.events.on("error", (queue, error) => {
+    queue.metadata?.channel?.send({ content: "❌ Error: " + error.message }).catch(() => {});
+    console.error("[discord-player]", error);
   });
 
-  console.log("✅ DisTube v5 inicializado");
+  console.log("✅ discord-player inicializado");
 }
 
-// ─────────────────────────────────────────────────────────────
-// Comando
-// ─────────────────────────────────────────────────────────────
 module.exports = {
-  setupDistube,
+  setupPlayer,
 
   data: new SlashCommandBuilder()
     .setName("musica")
@@ -104,23 +95,22 @@ module.exports = {
     ),
 
   async execute(interaction) {
-    const distube = interaction.client.distube;
-    if (!distube) {
+    const player = interaction.client.musicPlayer;
+    if (!player) {
       return interaction.reply({ content: EMOJI.CRUZ + " Sistema de música no disponible.", ephemeral: true });
     }
 
     const sub = interaction.options.getSubcommand();
 
-    // PLAY
     if (sub === "play") {
       const vc = interaction.member.voice.channel;
       if (!vc) return interaction.reply({ content: EMOJI.CRUZ + " Debes estar en un canal de voz.", ephemeral: true });
-      const busqueda = interaction.options.getString("busqueda");
       await interaction.deferReply();
+      const busqueda = interaction.options.getString("busqueda");
       try {
-        await distube.play(vc, busqueda, {
-          member:      interaction.member,
-          textChannel: interaction.channel,
+        await player.play(vc, busqueda, {
+          nodeOptions: { metadata: { channel: interaction.channel }, volume: 80 },
+          requestedBy: interaction.user,
         });
         await interaction.editReply({ content: EMOJI.CHECK + " Buscando **" + busqueda + "**..." });
       } catch (e) {
@@ -129,42 +119,46 @@ module.exports = {
       return;
     }
 
-    const queue = distube.getQueue(interaction.guildId);
+    const queue = player.nodes.get(interaction.guildId);
+    if (!queue || !queue.isPlaying()) {
+      return interaction.reply({ content: EMOJI.CRUZ + " No hay música reproduciéndose.", ephemeral: true });
+    }
 
-    if (!queue) return interaction.reply({ content: EMOJI.CRUZ + " No hay música reproduciéndose.", ephemeral: true });
-
-    if (sub === "pause")  { queue.pause();  return interaction.reply({ content: "⏸ Música pausada." }); }
-    if (sub === "resume") { queue.resume(); return interaction.reply({ content: "▶️ Música reanudada." }); }
-    if (sub === "skip")   { await queue.skip(); return interaction.reply({ content: "⏭ Canción saltada." }); }
-    if (sub === "stop")   { await queue.stop(); return interaction.reply({ content: "⏹ Música detenida y cola vaciada." }); }
+    if (sub === "pause")  { queue.node.pause();  return interaction.reply({ content: "⏸ Música pausada." }); }
+    if (sub === "resume") { queue.node.resume(); return interaction.reply({ content: "▶️ Música reanudada." }); }
+    if (sub === "skip")   { queue.node.skip();   return interaction.reply({ content: "⏭ Canción saltada." }); }
+    if (sub === "stop")   { queue.delete();      return interaction.reply({ content: "⏹ Música detenida y cola vaciada." }); }
 
     if (sub === "cola") {
-      const lista = queue.songs
-        .slice(0, 10)
-        .map((s, i) => `${i === 0 ? "▶️" : `${i}.`} **${s.name}** — ${s.formattedDuration}`)
-        .join("\n");
+      const current = queue.currentTrack;
+      const tracks  = queue.tracks.toArray().slice(0, 9);
+      const lista   = [
+        "▶️ **" + (current?.title || "?") + "** — " + (current?.duration || "?"),
+        ...tracks.map((t, i) => (i + 1) + ". **" + t.title + "** — " + t.duration)
+      ].join("\n");
       return interaction.reply({
         embeds: [new EmbedBuilder()
           .setColor("#5865F2")
           .setTitle("🎵 Cola de reproducción")
-          .setDescription(lista + (queue.songs.length > 10 ? `\n...y ${queue.songs.length - 10} más` : ""))
-          .setFooter({ text: `${queue.songs.length} canciones en cola` })
+          .setDescription(lista)
+          .setFooter({ text: (queue.tracks.size + 1) + " canciones en total" })
         ]
       });
     }
 
     if (sub === "volumen") {
       const nivel = interaction.options.getInteger("nivel");
-      queue.setVolume(nivel);
-      return interaction.reply({ content: `🔊 Volumen establecido a **${nivel}%**` });
+      queue.node.setVolume(nivel);
+      return interaction.reply({ content: "🔊 Volumen establecido a **" + nivel + "%**" });
     }
 
     if (sub === "loop") {
-      const RepeatMode = interaction.client.RepeatMode;
-      const modo = parseInt(interaction.options.getString("modo"));
-      queue.setRepeatMode(modo);
-      const modos = ["🚫 Sin loop", "🔂 Repitiendo canción", "🔁 Repitiendo cola"];
-      return interaction.reply({ content: `Modo de repetición: **${modos[modo]}**` });
+      const { QueueRepeatMode } = require("discord-player");
+      const modos   = [QueueRepeatMode.OFF, QueueRepeatMode.TRACK, QueueRepeatMode.QUEUE];
+      const nombres = ["🚫 Sin loop", "🔂 Repitiendo canción", "🔁 Repitiendo cola"];
+      const modo    = parseInt(interaction.options.getString("modo"));
+      queue.setRepeatMode(modos[modo]);
+      return interaction.reply({ content: "Modo de repetición: **" + nombres[modo] + "**" });
     }
   },
 };
