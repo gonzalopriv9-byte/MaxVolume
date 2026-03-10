@@ -159,7 +159,8 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.DirectMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildModeration
+    GatewayIntentBits.GuildModeration,
+    GatewayIntentBits.GuildVoiceStates
   ]
 });
 
@@ -304,9 +305,11 @@ client.once("ready", async () => {
   // ── MÚSICA: inicializar discord-player ───────────────
   try {
     const { setupPlayer } = require("./commands/musica");
+    addLog("info", "Iniciando discord-player...");
     await setupPlayer(client);
+    addLog("info", "musicPlayer asignado: " + !!client.musicPlayer);
   } catch (e) {
-    addLog("warning", "discord-player no disponible: " + e.message);
+    addLog("error", "discord-player ERROR: " + e.message + " | " + e.stack);
   }
   addLog("success", "Sistema de protección anti-nuke inicializado");
   addLog("info", "Sistema de comandos terminal activado - Escribe /changestatus [TEXTO] para cambiar el estado");
