@@ -1,6 +1,7 @@
 // commands/musica.js
-// Stream via yt-dlp (proceso externo) — compatible con ARM32
+// Stream via yt-dlp + ffmpeg — compatible con ARM32
 // Fuente: SoundCloud (no bloqueado desde IPs residenciales)
+// ffmpeg convierte HLS fragmentado a opus continuo para @discordjs/voice
 
 const { SlashCommandBuilder, EmbedBuilder } = require("discord.js");
 const {
@@ -58,9 +59,11 @@ async function searchTrack(query) {
   };
 }
 
-// Crea un stream de audio usando yt-dlp como proceso externo
-function createYtdlpStream(url) {
-  const proc = spawn(YTDLP, [
+// Obtiene la URL directa del stream y la pasa por ffmpeg
+// yt-dlp | ffmpeg -> opus PCM -> @discordjs/voice
+function createAudioStream(url, volume = 80) {
+  // Paso 1: obtener URL directa del stream con yt-dlp
+  const ytdlp = spawn(YTDLP, [
     "--no-warnings",
     "-f", "bestaudio",
     "--no-playlist",
@@ -68,12 +71,32 @@ function createYtdlpStream(url) {
     url,
   ]);
 
-  proc.stderr.on("data", d => {
+  // Paso 2: pasar por ffmpeg para decodificar HLS/opus/mp3 a PCM s16le
+  const ffmpeg = spawn("ffmpeg", [
+    "-i", "pipe:0",          // input desde stdin (yt-dlp stdout)
+    "-f", "s16le",           // formato PCM signed 16-bit little-endian
+    "-ar", "48000",          // sample rate Discord
+    "-ac", "2",              // stereo
+    "-af", `volume=${volume / 100}`,
+    "pipe:1",                // output a stdout
+  ], { stdio: ["pipe", "pipe", "pipe"] });
+
+  // Conectar yt-dlp stdout -> ffmpeg stdin
+  ytdlp.stdout.pipe(ffmpeg.stdin);
+
+  ytdlp.stderr.on("data", d => {
     const msg = d.toString();
-    if (!msg.includes("WARNING")) console.error("[yt-dlp stderr]", msg.trim());
+    if (!msg.includes("WARNING") && !msg.includes("%")) console.error("[yt-dlp]", msg.trim());
   });
 
-  return proc.stdout;
+  ffmpeg.stderr.on("data", d => {
+    // silenciar logs normales de ffmpeg
+  });
+
+  ytdlp.on("error", e => console.error("[yt-dlp error]", e.message));
+  ffmpeg.on("error", e => console.error("[ffmpeg error]", e.message));
+
+  return ffmpeg.stdout; // PCM s16le listo para @discordjs/voice
 }
 
 // ── Cola de reproducción ──────────────────────────────────────────────────────
@@ -94,19 +117,17 @@ async function playNext(guildId) {
 
   try {
     console.log(`[Musica] Iniciando stream: ${track.url}`);
-    const audioStream = createYtdlpStream(track.url);
+    const audioStream = createAudioStream(track.url, q.volume || 80);
 
     const resource = createAudioResource(audioStream, {
-      inputType: StreamType.Arbitrary,
-      inlineVolume: true,
+      inputType: StreamType.Raw, // PCM s16le directo
     });
 
-    resource.volume?.setVolume((q.volume || 80) / 100);
     q.player.play(resource);
 
     q.textChannel?.send({
       embeds: [new EmbedBuilder()
-        .setColor("#FF5500")  // naranja SoundCloud
+        .setColor("#FF5500")
         .setTitle("🎵 Reproduciendo ahora")
         .setDescription(`**[${track.title}](${track.url})**`)
         .setThumbnail(track.thumbnail || null)
@@ -250,8 +271,7 @@ module.exports = {
     if (sub === "volumen") {
       const nivel = interaction.options.getInteger("nivel");
       q.volume = nivel;
-      try { q.player.state?.resource?.volume?.setVolume(nivel / 100); } catch {}
-      return interaction.reply({ content: "🔊 Volumen: **" + nivel + "%**" });
+      return interaction.reply({ content: "🔊 Volumen: **" + nivel + "%** (se aplica en la siguiente canción)" });
     }
   },
 };
