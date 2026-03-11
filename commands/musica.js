@@ -1,6 +1,6 @@
-// commands/musica.js - play-dl (stream + search) + ffmpeg + @discordjs/voice
-// Compatible con Node v20, Raspberry Pi ARM32
-// play-dl resuelve URLs de YouTube directamente en Node.js sin necesitar yt-dlp
+// commands/musica.js
+// Usa @distube/ytdl-core (fork activo de ytdl-core con soporte 2026)
+// + @discordjs/voice para streaming directo sin yt-dlp
 
 const { SlashCommandBuilder, EmbedBuilder } = require("discord.js");
 const {
@@ -12,7 +12,8 @@ const {
   entersState,
   StreamType,
 } = require("@discordjs/voice");
-const playdl = require("play-dl");
+const ytdl = require("@distube/ytdl-core");
+const ytsr = require("ytsr");
 const path = require("path");
 const fs   = require("fs");
 
@@ -22,40 +23,37 @@ const EMOJI = {
   NEXALOGO: "<a:NEXALOGO:1477286399345561682>",
 };
 
-function parseCookiesTxt(filePath) {
-  return fs.readFileSync(filePath, "utf8")
-    .split("\n")
-    .filter(l => l && !l.startsWith("#"))
-    .map(l => {
-      const p = l.split("\t");
-      if (p.length < 7) return null;
-      const n = p[5].trim(), v = p[6].trim();
-      return (n && v) ? `${n}=${v}` : null;
-    })
-    .filter(Boolean)
-    .join("; ");
-}
-
-// Inicializar play-dl con cookies de YouTube
-(async () => {
+// Cargar cookies de YouTube para evitar bot detection
+function loadCookies() {
   try {
     const cp = path.join(__dirname, "../youtube.com_cookies.txt");
-    if (fs.existsSync(cp)) {
-      await playdl.setToken({ youtube: { cookie: parseCookiesTxt(cp) } });
-      console.log("[Musica] Cookies cargadas para play-dl.");
+    if (!fs.existsSync(cp)) return [];
+    const lines = fs.readFileSync(cp, "utf8").split("\n");
+    const cookies = [];
+    for (const line of lines) {
+      if (!line || line.startsWith("#")) continue;
+      const parts = line.split("\t");
+      if (parts.length < 7) continue;
+      const name  = parts[5]?.trim();
+      const value = parts[6]?.trim();
+      if (name && value) cookies.push({ name, value });
     }
+    console.log(`[Musica] Cargadas ${cookies.length} cookies de YouTube.`);
+    return cookies;
   } catch (e) {
-    console.error("[Musica] Error cookies:", e.message);
+    console.error("[Musica] Error cargando cookies:", e.message);
+    return [];
   }
-})();
+}
+
+const ytdlAgent = ytdl.createAgent(loadCookies());
 
 const queues = new Map();
-function getQueue(guildId) { return queues.get(guildId); }
 
 async function playNext(guildId) {
   const q = queues.get(guildId);
   if (!q || q.queue.length === 0) {
-    q?.textChannel?.send({ content: "Cola terminada." }).catch(() => {});
+    q?.textChannel?.send({ content: "Cola terminada. 👋" }).catch(() => {});
     q?.connection?.destroy();
     queues.delete(guildId);
     return;
@@ -67,14 +65,15 @@ async function playNext(guildId) {
   try {
     console.log(`[Musica] Iniciando stream: ${track.url}`);
 
-    // play-dl hace el stream directamente en Node.js, sin yt-dlp
-    const stream = await playdl.stream(track.url, {
-      quality: 2,           // 0=peor, 2=mejor
-      discordPlayerCompatibility: true,
+    const stream = ytdl(track.url, {
+      filter: "audioonly",
+      quality: "highestaudio",
+      highWaterMark: 1 << 25, // 32MB buffer para evitar cortes
+      agent: ytdlAgent,
     });
 
-    const resource = createAudioResource(stream.stream, {
-      inputType: stream.type,
+    const resource = createAudioResource(stream, {
+      inputType: StreamType.Arbitrary,
       inlineVolume: true,
     });
 
@@ -84,7 +83,7 @@ async function playNext(guildId) {
     q.textChannel?.send({
       embeds: [new EmbedBuilder()
         .setColor("#5865F2")
-        .setTitle("Reproduciendo ahora")
+        .setTitle("🎵 Reproduciendo ahora")
         .setDescription(`**[${track.title}](${track.url})**`)
         .setThumbnail(track.thumbnail || null)
         .addFields(
@@ -98,7 +97,7 @@ async function playNext(guildId) {
   } catch (e) {
     console.error(`[Musica] Error stream: ${e.message}`);
     q?.textChannel?.send({ content: EMOJI.CRUZ + " Error reproduciendo: " + e.message }).catch(() => {});
-    playNext(guildId);
+    setTimeout(() => playNext(guildId), 1000);
   }
 }
 
@@ -113,15 +112,18 @@ async function addToQueue(guildId, voiceChannel, textChannel, track) {
       selfDeaf: false,
       selfMute: false,
     });
+
     const player = createAudioPlayer();
     connection.subscribe(player);
 
     player.on(AudioPlayerStatus.Idle, () => playNext(guildId));
     player.on("error", err => {
       console.error("[Musica] Player error:", err.message);
-      q?.textChannel?.send({ content: EMOJI.CRUZ + " Error de audio: " + err.message }).catch(() => {});
-      playNext(guildId);
+      const q2 = queues.get(guildId);
+      q2?.textChannel?.send({ content: EMOJI.CRUZ + " Error de audio: " + err.message }).catch(() => {});
+      setTimeout(() => playNext(guildId), 1000);
     });
+
     connection.on(VoiceConnectionStatus.Disconnected, async () => {
       try {
         await entersState(connection, VoiceConnectionStatus.Signalling, 5_000);
@@ -140,9 +142,9 @@ async function addToQueue(guildId, voiceChannel, textChannel, track) {
     textChannel.send({
       embeds: [new EmbedBuilder()
         .setColor("#5865F2")
-        .setTitle("Anadido a la cola")
+        .setTitle("➕ Añadido a la cola")
         .setDescription(`**${track.title}** - ${track.duration || "?"}`)
-        .setFooter({ text: "Posicion: " + q.queue.length })
+        .setFooter({ text: "Posición: " + q.queue.length })
       ]
     }).catch(() => {});
   }
@@ -175,7 +177,7 @@ module.exports = {
 
     if (sub === "play") {
       const vc = interaction.member.voice.channel;
-      if (!vc) return interaction.reply({ content: EMOJI.CRUZ + " Debes estar en un canal de voz.", ephemeral: true });
+      if (!vc) return interaction.reply({ content: EMOJI.CRUZ + " Debes estar en un canal de voz.", flags: 64 });
 
       await interaction.deferReply();
       const busqueda = interaction.options.getString("busqueda");
@@ -183,34 +185,34 @@ module.exports = {
       try {
         let trackInfo;
 
-        if (busqueda.includes("youtube.com") || busqueda.includes("youtu.be")) {
-          // URL directa
-          const info = await playdl.video_info(busqueda);
-          const v = info.video_details;
+        if (ytdl.validateURL(busqueda)) {
+          // URL directa de YouTube
+          const info = await ytdl.getInfo(busqueda, { agent: ytdlAgent });
+          const v = info.videoDetails;
           trackInfo = {
             title:       v.title,
-            url:         v.url,
-            duration:    v.durationRaw,
+            url:         v.video_url,
+            duration:    new Date(parseInt(v.lengthSeconds) * 1000).toISOString().substr(11, 8),
             thumbnail:   v.thumbnails?.[0]?.url,
             requestedBy: interaction.user.toString(),
           };
         } else {
-          // Busqueda por texto
-          const results = await playdl.search(busqueda, { limit: 1, source: { youtube: "video" } });
-          if (!results.length) return interaction.editReply({ content: EMOJI.CRUZ + " No se encontro ningun resultado." });
-          const v = results[0];
+          // Búsqueda por texto con ytsr
+          const results = await ytsr(busqueda, { limit: 5 });
+          const video = results.items.find(i => i.type === "video");
+          if (!video) return interaction.editReply({ content: EMOJI.CRUZ + " No se encontró ningún resultado." });
           trackInfo = {
-            title:       v.title,
-            url:         `https://www.youtube.com/watch?v=${v.id}`,
-            duration:    v.durationRaw,
-            thumbnail:   v.thumbnails?.[0]?.url,
+            title:       video.title,
+            url:         video.url,
+            duration:    video.duration || "?",
+            thumbnail:   video.bestThumbnail?.url,
             requestedBy: interaction.user.toString(),
           };
         }
 
         console.log(`[Musica] Track URL: ${trackInfo.url}`);
         await addToQueue(interaction.guildId, vc, interaction.channel, trackInfo);
-        await interaction.editReply({ content: EMOJI.CHECK + " Anadiendo **" + trackInfo.title + "** a la cola..." });
+        await interaction.editReply({ content: EMOJI.CHECK + " Añadiendo **" + trackInfo.title + "** a la cola..." });
 
       } catch (e) {
         console.error("[Musica] Error play:", e.message);
@@ -219,32 +221,35 @@ module.exports = {
       return;
     }
 
-    const q = getQueue(interaction.guildId);
-    if (!q) return interaction.reply({ content: EMOJI.CRUZ + " No hay musica reproduciendose.", ephemeral: true });
+    const q = queues.get(interaction.guildId);
+    if (!q) return interaction.reply({ content: EMOJI.CRUZ + " No hay musica reproduciendose.", flags: 64 });
 
-    if (sub === "pause")  { q.player.pause();   return interaction.reply({ content: "Musica pausada." }); }
-    if (sub === "resume") { q.player.unpause(); return interaction.reply({ content: "Musica reanudada." }); }
-    if (sub === "skip")   { q.player.stop();    return interaction.reply({ content: "Cancion saltada." }); }
+    if (sub === "pause")  { q.player.pause();   return interaction.reply({ content: "⏸️ Musica pausada." }); }
+    if (sub === "resume") { q.player.unpause(); return interaction.reply({ content: "▶️ Musica reanudada." }); }
+    if (sub === "skip")   { q.player.stop();    return interaction.reply({ content: "⏭️ Cancion saltada." }); }
 
     if (sub === "stop") {
       q.queue = []; q.player.stop(); q.connection.destroy(); queues.delete(interaction.guildId);
-      return interaction.reply({ content: "Musica detenida y cola vaciada." });
+      return interaction.reply({ content: "⏹️ Musica detenida y cola vaciada." });
     }
+
     if (sub === "cola") {
       const lista = [
-        q.current ? "** " + q.current.title + "** - " + (q.current.duration || "?") : "(nada)",
-        ...q.queue.slice(0, 9).map((t, i) => (i+1) + ". **" + t.title + "** - " + (t.duration || "?"))
+        q.current ? "▶️ **" + q.current.title + "** - " + (q.current.duration || "?") : "(nada)",
+        ...q.queue.slice(0, 9).map((t, i) => (i + 1) + ". **" + t.title + "** - " + (t.duration || "?"))
       ].join("\n");
       return interaction.reply({
-        embeds: [new EmbedBuilder().setColor("#5865F2").setTitle("Cola").setDescription(lista)
+        embeds: [new EmbedBuilder().setColor("#5865F2").setTitle("🎵 Cola")
+          .setDescription(lista)
           .setFooter({ text: (q.queue.length + (q.current ? 1 : 0)) + " canciones" })]
       });
     }
+
     if (sub === "volumen") {
       const nivel = interaction.options.getInteger("nivel");
       q.volume = nivel;
       try { q.player.state?.resource?.volume?.setVolume(nivel / 100); } catch {}
-      return interaction.reply({ content: "Volumen: **" + nivel + "%**" });
+      return interaction.reply({ content: "🔊 Volumen: **" + nivel + "%**" });
     }
   },
 };
