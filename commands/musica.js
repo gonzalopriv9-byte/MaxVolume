@@ -1,6 +1,6 @@
 // commands/musica.js
-// Usa @distube/ytdl-core (fork activo de ytdl-core con soporte 2026)
-// + @discordjs/voice para streaming directo sin yt-dlp
+// Stream via yt-dlp (proceso externo) — compatible con ARM32 sin Deno
+// Búsqueda via yt-dlp --get-id (no necesita ytsr ni YouTube API)
 
 const { SlashCommandBuilder, EmbedBuilder } = require("discord.js");
 const {
@@ -12,10 +12,12 @@ const {
   entersState,
   StreamType,
 } = require("@discordjs/voice");
-const ytdl = require("@distube/ytdl-core");
-const ytsr = require("ytsr");
+const { spawn, execFile } = require("child_process");
 const path = require("path");
 const fs   = require("fs");
+
+const COOKIES_PATH = path.join(__dirname, "../youtube.com_cookies.txt");
+const YTDLP = "yt-dlp"; // en PATH tras añadir ~/.local/bin
 
 const EMOJI = {
   CHECK:    "<a:Tick:1480638398816456848>",
@@ -23,30 +25,70 @@ const EMOJI = {
   NEXALOGO: "<a:NEXALOGO:1477286399345561682>",
 };
 
-// Cargar cookies de YouTube para evitar bot detection
-function loadCookies() {
-  try {
-    const cp = path.join(__dirname, "../youtube.com_cookies.txt");
-    if (!fs.existsSync(cp)) return [];
-    const lines = fs.readFileSync(cp, "utf8").split("\n");
-    const cookies = [];
-    for (const line of lines) {
-      if (!line || line.startsWith("#")) continue;
-      const parts = line.split("\t");
-      if (parts.length < 7) continue;
-      const name  = parts[5]?.trim();
-      const value = parts[6]?.trim();
-      if (name && value) cookies.push({ name, value });
-    }
-    console.log(`[Musica] Cargadas ${cookies.length} cookies de YouTube.`);
-    return cookies;
-  } catch (e) {
-    console.error("[Musica] Error cargando cookies:", e.message);
-    return [];
-  }
+// Ejecuta yt-dlp y devuelve stdout como string
+function ytdlpRun(args) {
+  return new Promise((resolve, reject) => {
+    execFile(YTDLP, args, { timeout: 20000 }, (err, stdout, stderr) => {
+      if (err) return reject(new Error(stderr || err.message));
+      resolve(stdout.trim());
+    });
+  });
 }
 
-const ytdlAgent = ytdl.createAgent(loadCookies());
+// Busca en YouTube y devuelve info del primer resultado
+async function searchYoutube(query) {
+  // Si es URL directa, obtener info directamente
+  const isUrl = /^https?:\/\/(www\.)?(youtube\.com|youtu\.be)/.test(query);
+  const target = isUrl ? query : `ytsearch1:${query}`;
+
+  const cookiesArgs = fs.existsSync(COOKIES_PATH)
+    ? ["--cookies", COOKIES_PATH]
+    : [];
+
+  const raw = await ytdlpRun([
+    ...cookiesArgs,
+    "--no-warnings",
+    "--print", "%(id)s\t%(title)s\t%(duration_string)s\t%(thumbnail)s",
+    "--no-playlist",
+    "--skip-download",
+    target,
+  ]);
+
+  const [id, title, duration, thumbnail] = raw.split("\t");
+  if (!id) throw new Error("No se encontró ningún resultado.");
+
+  return {
+    title:     title || "Sin título",
+    url:       `https://www.youtube.com/watch?v=${id}`,
+    duration:  duration || "?",
+    thumbnail: thumbnail || null,
+  };
+}
+
+// Crea un stream de audio usando yt-dlp como proceso externo
+function createYtdlpStream(url) {
+  const cookiesArgs = fs.existsSync(COOKIES_PATH)
+    ? ["--cookies", COOKIES_PATH]
+    : [];
+
+  const proc = spawn(YTDLP, [
+    ...cookiesArgs,
+    "--no-warnings",
+    "-f", "bestaudio[ext=webm]/bestaudio/best",
+    "--no-playlist",
+    "-o", "-",   // output a stdout
+    url,
+  ]);
+
+  proc.stderr.on("data", d => {
+    const msg = d.toString();
+    if (!msg.includes("WARNING")) console.error("[yt-dlp stderr]", msg.trim());
+  });
+
+  return proc.stdout; // readable stream directo a ffmpeg/discordjs
+}
+
+// ── Cola de reproducción ──────────────────────────────────────────────────────
 
 const queues = new Map();
 
@@ -64,15 +106,9 @@ async function playNext(guildId) {
 
   try {
     console.log(`[Musica] Iniciando stream: ${track.url}`);
+    const audioStream = createYtdlpStream(track.url);
 
-    const stream = ytdl(track.url, {
-      filter: "audioonly",
-      quality: "highestaudio",
-      highWaterMark: 1 << 25, // 32MB buffer para evitar cortes
-      agent: ytdlAgent,
-    });
-
-    const resource = createAudioResource(stream, {
+    const resource = createAudioResource(audioStream, {
       inputType: StreamType.Arbitrary,
       inlineVolume: true,
     });
@@ -133,7 +169,7 @@ async function addToQueue(guildId, voiceChannel, textChannel, track) {
       }
     });
 
-    q = { connection, player, queue: [track], current: null, textChannel, volume: 80, loop: 0 };
+    q = { connection, player, queue: [track], current: null, textChannel, volume: 80 };
     queues.set(guildId, q);
     playNext(guildId);
   } else {
@@ -149,6 +185,8 @@ async function addToQueue(guildId, voiceChannel, textChannel, track) {
     }).catch(() => {});
   }
 }
+
+// ── Comando Slash ─────────────────────────────────────────────────────────────
 
 module.exports = {
   setupPlayer: async () => {},
@@ -183,32 +221,8 @@ module.exports = {
       const busqueda = interaction.options.getString("busqueda");
 
       try {
-        let trackInfo;
-
-        if (ytdl.validateURL(busqueda)) {
-          // URL directa de YouTube
-          const info = await ytdl.getInfo(busqueda, { agent: ytdlAgent });
-          const v = info.videoDetails;
-          trackInfo = {
-            title:       v.title,
-            url:         v.video_url,
-            duration:    new Date(parseInt(v.lengthSeconds) * 1000).toISOString().substr(11, 8),
-            thumbnail:   v.thumbnails?.[0]?.url,
-            requestedBy: interaction.user.toString(),
-          };
-        } else {
-          // Búsqueda por texto con ytsr
-          const results = await ytsr(busqueda, { limit: 5 });
-          const video = results.items.find(i => i.type === "video");
-          if (!video) return interaction.editReply({ content: EMOJI.CRUZ + " No se encontró ningún resultado." });
-          trackInfo = {
-            title:       video.title,
-            url:         video.url,
-            duration:    video.duration || "?",
-            thumbnail:   video.bestThumbnail?.url,
-            requestedBy: interaction.user.toString(),
-          };
-        }
+        const trackInfo = await searchYoutube(busqueda);
+        trackInfo.requestedBy = interaction.user.toString();
 
         console.log(`[Musica] Track URL: ${trackInfo.url}`);
         await addToQueue(interaction.guildId, vc, interaction.channel, trackInfo);
