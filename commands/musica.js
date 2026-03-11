@@ -1,7 +1,7 @@
 // commands/musica.js
-// Stream via yt-dlp + ffmpeg — compatible con ARM32
-// Fuente: SoundCloud (no bloqueado desde IPs residenciales)
-// ffmpeg convierte HLS fragmentado a opus continuo para @discordjs/voice
+// Fuente: Deezer API (gratuita, sin autenticacion, MP3 directo)
+// Stream via ffmpeg -> PCM s16le -> @discordjs/voice
+// NOTA: previews de 30 segundos por cancion
 
 const { SlashCommandBuilder, EmbedBuilder } = require("discord.js");
 const {
@@ -13,11 +13,8 @@ const {
   entersState,
   StreamType,
 } = require("@discordjs/voice");
-const { spawn, execFile } = require("child_process");
-const path = require("path");
-const fs   = require("fs");
-
-const YTDLP = "yt-dlp";
+const { spawn } = require("child_process");
+const https = require("https");
 
 const EMOJI = {
   CHECK:    "<a:Tick:1480638398816456848>",
@@ -25,78 +22,49 @@ const EMOJI = {
   NEXALOGO: "<a:NEXALOGO:1477286399345561682>",
 };
 
-// Ejecuta yt-dlp y devuelve stdout como string
-function ytdlpRun(args) {
+// Busca en Deezer y devuelve info del primer resultado
+function searchDeezer(query) {
   return new Promise((resolve, reject) => {
-    execFile(YTDLP, args, { timeout: 25000 }, (err, stdout, stderr) => {
-      if (err) return reject(new Error(stderr?.trim() || err.message));
-      resolve(stdout.trim());
-    });
+    const url = `https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=1`;
+    https.get(url, res => {
+      let data = "";
+      res.on("data", chunk => data += chunk);
+      res.on("end", () => {
+        try {
+          const json = JSON.parse(data);
+          const track = json?.data?.[0];
+          if (!track || !track.preview) return reject(new Error("No se encontro ningun resultado en Deezer."));
+          resolve({
+            title:     `${track.artist.name} - ${track.title}`,
+            url:       track.link,
+            preview:   track.preview,
+            duration:  "0:30",
+            thumbnail: track.album.cover_medium || null,
+          });
+        } catch (e) {
+          reject(new Error("Error parseando respuesta de Deezer."));
+        }
+      });
+    }).on("error", reject);
   });
 }
 
-// Busca en SoundCloud y devuelve info del primer resultado
-async function searchTrack(query) {
-  const isUrl = /^https?:\/\//.test(query);
-  const target = isUrl ? query : `scsearch1:${query}`;
-
-  const raw = await ytdlpRun([
-    "--no-warnings",
-    "--print", "%(webpage_url)s\t%(title)s\t%(duration_string)s\t%(thumbnail)s",
-    "--no-playlist",
-    "--skip-download",
-    target,
-  ]);
-
-  const [url, title, duration, thumbnail] = raw.split("\t");
-  if (!url) throw new Error("No se encontró ningún resultado.");
-
-  return {
-    title:     title || "Sin título",
-    url,
-    duration:  duration || "?",
-    thumbnail: thumbnail || null,
-  };
-}
-
-// Obtiene la URL directa del stream y la pasa por ffmpeg
-// yt-dlp | ffmpeg -> opus PCM -> @discordjs/voice
-function createAudioStream(url, volume = 80) {
-  // Paso 1: obtener URL directa del stream con yt-dlp
-  const ytdlp = spawn(YTDLP, [
-    "--no-warnings",
-    "-f", "bestaudio",
-    "--no-playlist",
-    "-o", "-",
-    url,
-  ]);
-
-  // Paso 2: pasar por ffmpeg para decodificar HLS/opus/mp3 a PCM s16le
+// Crea stream PCM s16le desde URL MP3 de Deezer via ffmpeg
+function createFfmpegStream(mp3Url, volume = 80) {
   const ffmpeg = spawn("ffmpeg", [
-    "-i", "pipe:0",          // input desde stdin (yt-dlp stdout)
-    "-f", "s16le",           // formato PCM signed 16-bit little-endian
-    "-ar", "48000",          // sample rate Discord
-    "-ac", "2",              // stereo
+    "-i", mp3Url,
+    "-f", "s16le",
+    "-ar", "48000",
+    "-ac", "2",
     "-af", `volume=${volume / 100}`,
-    "pipe:1",                // output a stdout
-  ], { stdio: ["pipe", "pipe", "pipe"] });
+    "-loglevel", "error",
+    "pipe:1",
+  ]);
 
-  // Conectar yt-dlp stdout -> ffmpeg stdin
-  ytdlp.stdout.pipe(ffmpeg.stdin);
-
-  ytdlp.stderr.on("data", d => {
-    const msg = d.toString();
-    if (!msg.includes("WARNING") && !msg.includes("%")) console.error("[yt-dlp]", msg.trim());
-  });
-
-  ffmpeg.stderr.on("data", d => {
-    // silenciar logs normales de ffmpeg
-  });
-
-  ytdlp.on("error", e => console.error("[yt-dlp error]", e.message));
+  ffmpeg.stderr.on("data", d => console.error("[ffmpeg]", d.toString().trim()));
   ffmpeg.on("error", e => console.error("[ffmpeg error]", e.message));
 
-  return ffmpeg.stdout; // PCM s16le listo para @discordjs/voice
+  return ffmpeg.stdout;
 }
 
 // ── Cola de reproducción ──────────────────────────────────────────────────────
@@ -116,26 +84,26 @@ async function playNext(guildId) {
   q.current = track;
 
   try {
-    console.log(`[Musica] Iniciando stream: ${track.url}`);
-    const audioStream = createAudioStream(track.url, q.volume || 80);
+    console.log(`[Musica] Iniciando stream: ${track.preview}`);
+    const audioStream = createFfmpegStream(track.preview, q.volume || 80);
 
     const resource = createAudioResource(audioStream, {
-      inputType: StreamType.Raw, // PCM s16le directo
+      inputType: StreamType.Raw,
     });
 
     q.player.play(resource);
 
     q.textChannel?.send({
       embeds: [new EmbedBuilder()
-        .setColor("#FF5500")
+        .setColor("#A238FF")  // morado Deezer
         .setTitle("🎵 Reproduciendo ahora")
         .setDescription(`**[${track.title}](${track.url})**`)
         .setThumbnail(track.thumbnail || null)
         .addFields(
-          { name: "Duracion",   value: track.duration || "?",    inline: true },
+          { name: "Duracion",   value: "0:30 (preview)", inline: true },
           { name: "Solicitado", value: track.requestedBy || "-", inline: true },
         )
-        .setFooter({ text: "NexaBot Music • SoundCloud" })
+        .setFooter({ text: "NexaBot Music • Deezer" })
       ]
     }).catch(() => {});
 
@@ -186,9 +154,9 @@ async function addToQueue(guildId, voiceChannel, textChannel, track) {
     q.textChannel = textChannel;
     textChannel.send({
       embeds: [new EmbedBuilder()
-        .setColor("#FF5500")
+        .setColor("#A238FF")
         .setTitle("➕ Añadido a la cola")
-        .setDescription(`**${track.title}** - ${track.duration || "?"}`)
+        .setDescription(`**${track.title}**`)
         .setFooter({ text: "Posición: " + q.queue.length })
       ]
     }).catch(() => {});
@@ -202,11 +170,11 @@ module.exports = {
 
   data: new SlashCommandBuilder()
     .setName("musica")
-    .setDescription("Sistema de musica")
+    .setDescription("Sistema de musica (previews 30s via Deezer)")
     .addSubcommand(s => s
       .setName("play")
-      .setDescription("Reproduce una cancion o URL de SoundCloud")
-      .addStringOption(o => o.setName("busqueda").setDescription("Nombre o URL").setRequired(true))
+      .setDescription("Reproduce una cancion")
+      .addStringOption(o => o.setName("busqueda").setDescription("Nombre del artista y cancion").setRequired(true))
     )
     .addSubcommand(s => s.setName("pause").setDescription("Pausa la reproduccion"))
     .addSubcommand(s => s.setName("resume").setDescription("Reanuda la reproduccion"))
@@ -230,10 +198,10 @@ module.exports = {
       const busqueda = interaction.options.getString("busqueda");
 
       try {
-        const trackInfo = await searchTrack(busqueda);
+        const trackInfo = await searchDeezer(busqueda);
         trackInfo.requestedBy = interaction.user.toString();
 
-        console.log(`[Musica] Track URL: ${trackInfo.url}`);
+        console.log(`[Musica] Track: ${trackInfo.title} | Preview: ${trackInfo.preview}`);
         await addToQueue(interaction.guildId, vc, interaction.channel, trackInfo);
         await interaction.editReply({ content: EMOJI.CHECK + " Añadiendo **" + trackInfo.title + "** a la cola..." });
 
@@ -258,11 +226,11 @@ module.exports = {
 
     if (sub === "cola") {
       const lista = [
-        q.current ? "▶️ **" + q.current.title + "** - " + (q.current.duration || "?") : "(nada)",
-        ...q.queue.slice(0, 9).map((t, i) => (i + 1) + ". **" + t.title + "** - " + (t.duration || "?"))
+        q.current ? "▶️ **" + q.current.title + "** - 0:30" : "(nada)",
+        ...q.queue.slice(0, 9).map((t, i) => (i + 1) + ". **" + t.title + "** - 0:30")
       ].join("\n");
       return interaction.reply({
-        embeds: [new EmbedBuilder().setColor("#FF5500").setTitle("🎵 Cola")
+        embeds: [new EmbedBuilder().setColor("#A238FF").setTitle("🎵 Cola")
           .setDescription(lista)
           .setFooter({ text: (q.queue.length + (q.current ? 1 : 0)) + " canciones" })]
       });
