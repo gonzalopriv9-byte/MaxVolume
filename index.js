@@ -44,6 +44,41 @@ console.log(
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 
+// ==================== UNBELIEVABOAT API ====================
+const UB_API_TOKEN = process.env.UB_API_TOKEN; // Token de la app NEXA bot en unbelievaboat.com
+const UB_API_BASE  = "https://unbelievaboat.com/api/v1";
+
+async function ubGetBalance(guildId, userId) {
+  const res = await fetch(`${UB_API_BASE}/guilds/${guildId}/users/${userId}`, {
+    headers: { Authorization: UB_API_TOKEN }
+  });
+  if (!res.ok) throw new Error("UB getBalance error: " + res.status);
+  return res.json(); // { user_id, cash, bank, total }
+}
+
+async function ubSetBalance(guildId, userId, { cash, bank } = {}) {
+  const body = {};
+  if (cash  !== undefined) body.cash  = cash;
+  if (bank  !== undefined) body.bank  = bank;
+  const res = await fetch(`${UB_API_BASE}/guilds/${guildId}/users/${userId}`, {
+    method: "PATCH",
+    headers: { Authorization: UB_API_TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) throw new Error("UB setBalance error: " + res.status);
+  return res.json();
+}
+
+async function ubAddBalance(guildId, userId, { cash = 0, bank = 0 } = {}) {
+  const res = await fetch(`${UB_API_BASE}/guilds/${guildId}/users/${userId}`, {
+    method: "PUT",
+    headers: { Authorization: UB_API_TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ cash, bank })
+  });
+  if (!res.ok) throw new Error("UB addBalance error: " + res.status);
+  return res.json();
+}
+
 // ==================== SUPABASE ====================
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -151,6 +186,10 @@ if (!TOKEN || !CLIENT_ID) {
   botEnabled = false;
 }
 
+if (!UB_API_TOKEN) {
+  console.warn("⚠️ UB_API_TOKEN no definido - Las funciones de economía UnbelievaBoat estarán desactivadas");
+}
+
 // ==================== CLIENTE DISCORD ====================
 const client = new Client({
   intents: [
@@ -166,6 +205,12 @@ const client = new Client({
 
 client.commands = new Collection();
 client.supabase = supabase; // ← necesario para kickinactive y otros comandos
+
+// Exponer helpers de UB en el cliente para que los comandos los usen
+client.ubGetBalance  = ubGetBalance;
+client.ubSetBalance  = ubSetBalance;
+client.ubAddBalance  = ubAddBalance;
+
 global.maintenanceMode = false;
 const MAINTENANCE_USER_ID = "1352652366330986526";
 
@@ -319,6 +364,13 @@ client.once("ready", async () => {
   setInterval(() => runKickInactiveJob(client).catch(() => {}), 24 * 60 * 60 * 1000);
   setTimeout(() => runKickInactiveJob(client).catch(() => {}), 5000);
   addLog("success", "Job de kick inactivos iniciado");
+
+  // ── UNBELIEVABOAT: verificar conexión ────────────────
+  if (UB_API_TOKEN) {
+    addLog("success", "UnbelievaBoat API configurada correctamente ✅");
+  } else {
+    addLog("warning", "UnbelievaBoat API no configurada - falta UB_API_TOKEN en .env");
+  }
 
   // ==================== AUTO-PING CADA 15 MINUTOS ====================
   const PING_GUILD_ID = process.env.GUILD_ID;
@@ -1133,7 +1185,7 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-        // BOTONES: BACKUP NOTIFY
+    // BOTONES: BACKUP NOTIFY
     if (interaction.isButton() && interaction.customId.startsWith("backup_notify_yes_")) {
       const guildId = interaction.customId.split("backup_notify_yes_")[1];
 
