@@ -1,102 +1,95 @@
-// ───────── SISTEMA DE APUESTAS: MODAL OPCIONES ─────────
-if (interaction.isModalSubmit() && interaction.customId.startsWith("apostar_opciones_")) {
-  // customId: apostar_opciones_<numOpciones>_<titulo>
-  const partes = interaction.customId.split("_");
-  // partes[0]="apostar" partes[1]="opciones" partes[2]=numOpciones partes[3..]=titulo codificado
-  const numOpciones = parseInt(partes[2], 10);
-  const titulo = decodeURIComponent(partes.slice(3).join("_"));
+const {
+  SlashCommandBuilder,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+} = require("discord.js");
 
-  const opciones = [];
-  for (let i = 1; i <= numOpciones; i++) {
-    opciones.push(interaction.fields.getTextInputValue(`opcion${i}`));
-  }
+const EMOJI = {
+  TICKET:      "<a:Ticket:1472541437470965942>",
+  CRUZ:        "<a:CruzRoja:1480947488960806943>",
+  CHECK:       "<a:Tick:1480638398816456848>",
+  CORREO:      "<a:correo:1472550293152596000>",
+  NUKE:        "<a:NUKE:1477617312679858318>",
+  ADVERTENCIA: "<a:ADVERTENCIA:1477616948937490452>",
+  NEXALOGO:    "<a:NEXALOGO:1477286399345561682>",
+};
 
-  await interaction.deferReply({ ephemeral: true });
+module.exports = {
+  data: new SlashCommandBuilder()
+    .setName("apostar")
+    .setDescription("Crear un evento de apuestas")
+    .addStringOption(opt =>
+      opt.setName("titulo").setDescription("Título del evento, ej: MADRID vs CITY").setRequired(true)
+    )
+    .addStringOption(opt =>
+      opt.setName("opciones")
+        .setDescription("Número de opciones (2 normal · 3-4 requiere suscripción Elite)")
+        .setRequired(true)
+        .addChoices(
+          { name: "2 opciones", value: "2" },
+          { name: "3 opciones (Elite)", value: "3" },
+          { name: "4 opciones (Elite)", value: "4" },
+        )
+    ),
 
-  const supabase = interaction.client.supabase;
-  const emojiOpciones = ["🅰️", "🅱️", "🅲", "🅳"];
-  const colores = [ButtonStyle.Success, ButtonStyle.Danger, ButtonStyle.Primary, ButtonStyle.Secondary];
+  async execute(interaction) {
+    const supabase = interaction.client.supabase;
 
-  try {
-    const embedFields = opciones.map((op, i) => ({
-      name: `Opción ${i + 1}`,
-      value: `${emojiOpciones[i]} ${op}`,
-      inline: true,
-    }));
-    embedFields.push({ name: "Estado", value: "`ABIERTA`", inline: false });
-
-    const embed = new EmbedBuilder()
-      .setColor("#00BFFF")
-      .setTitle(`${EMOJI.NEXALOGO} Evento de apuestas`)
-      .setDescription(
-        `**${titulo}**\n\n` +
-        `Pulsa un botón para apostar por tu opción.\n` +
-        `Cada apuesta usará tu saldo de UnbelievaBoat (cash).`
-      )
-      .addFields(embedFields)
-      .setFooter({ text: "Sistema de apuestas NexaBot + UnbelievaBoat" })
-      .setTimestamp();
-
-    // Botones temporales
-    const tempRow = new ActionRowBuilder().addComponents(
-      opciones.map((op, i) =>
-        new ButtonBuilder()
-          .setCustomId(`bet_event_pending_${i + 1}`)
-          .setLabel(`Apostar por ${op}`)
-          .setStyle(colores[i])
-      )
-    );
-
-    const msg = await interaction.channel.send({ embeds: [embed], components: [tempRow] });
-
-    // Guardar en Supabase
-    const insertData = {
-      guild_id:   interaction.guild.id,
-      channel_id: interaction.channel.id,
-      message_id: msg.id,
-      titulo,
-      opcion1: opciones[0],
-      opcion2: opciones[1],
-      status: "open",
-    };
-    if (opciones[2]) insertData.opcion3 = opciones[2];
-    if (opciones[3]) insertData.opcion4 = opciones[3];
-
-    const { data, error } = await supabase
-      .from("bet_events")
-      .insert([insertData])
-      .select()
-      .single();
-
-    if (error || !data) {
-      console.error("Supabase bet_events insert error:", error);
-      return interaction.editReply({ content: `${EMOJI.CRUZ} Error guardando el evento en la base de datos.` });
+    if (!supabase) {
+      return interaction.reply({
+        content: `${EMOJI.CRUZ} Supabase no está disponible.`,
+        ephemeral: true,
+      });
     }
 
-    const eventId = data.id;
+    const titulo      = interaction.options.getString("titulo");
+    const numOpciones = parseInt(interaction.options.getString("opciones"), 10);
 
-    // Actualizar botones con ID real
-    const realRow = new ActionRowBuilder().addComponents(
-      opciones.map((op, i) =>
-        new ButtonBuilder()
-          .setCustomId(`bet_event_${eventId}_${i + 1}`)
-          .setLabel(`Apostar por ${op}`)
-          .setStyle(colores[i])
-      )
-    );
-    await msg.edit({ components: [realRow] });
+    // ── Comprobar suscripción Elite si pide más de 2 opciones
+    if (numOpciones > 2) {
+      const { data: sub } = await supabase
+        .from("premium_subscriptions")
+        .select("active, expires_at")
+        .eq("guild_id", interaction.guild.id)
+        .eq("active", true)
+        .maybeSingle();
 
-    await interaction.editReply({
-      content:
-        `${EMOJI.CHECK} **Evento de apuestas creado correctamente.**\n\n` +
-        `> 🆔 **ID del evento:** \`${eventId}\`\n` +
-        `> ${EMOJI.ADVERTENCIA} **Guarda este ID**, lo necesitarás para dar el resultado con \`/resolverapuesta\`.\n` +
-        `> ${EMOJI.NEXALOGO} El evento ya es visible en el canal.`,
-    });
+      const ahora = new Date();
+      const valida = sub && (sub.expires_at === null || new Date(sub.expires_at) > ahora);
 
-  } catch (err) {
-    console.error("Error creando apuesta desde modal:", err);
-    await interaction.editReply({ content: `${EMOJI.CRUZ} Ocurrió un error creando el evento.` });
-  }
-  return;
-}
+      if (!valida) {
+        return interaction.reply({
+          content:
+            `${EMOJI.ADVERTENCIA} **Necesitas una suscripción Elite activa** para crear eventos con más de 2 opciones.\n` +
+            `Usa \`/premium\` para más información.`,
+          ephemeral: true,
+        });
+      }
+    }
+
+    // ── Mostrar modal para rellenar las opciones
+    const modal = new ModalBuilder()
+      .setCustomId(`apostar_opciones_${numOpciones}_${encodeURIComponent(titulo)}`)
+      .setTitle(`Opciones del evento (${numOpciones})`);
+
+    for (let i = 1; i <= numOpciones; i++) {
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId(`opcion${i}`)
+            .setLabel(`Opción ${i}`)
+            .setStyle(TextInputStyle.Short)
+            .setPlaceholder(i === 1 ? "Ej: Real Madrid" : i === 2 ? "Ej: Man City" : `Opción ${i}`)
+            .setRequired(true)
+        )
+      );
+    }
+
+    await interaction.showModal(modal);
+  },
+};
