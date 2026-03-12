@@ -45,7 +45,7 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 
 // ==================== UNBELIEVABOAT API ====================
-const UB_API_TOKEN = process.env.UB_API_TOKEN; // Token de la app NEXA bot en unbelievaboat.com
+const UB_API_TOKEN = process.env.UB_API_TOKEN;
 const UB_API_BASE  = "https://unbelievaboat.com/api/v1";
 
 async function ubGetBalance(guildId, userId) {
@@ -53,7 +53,7 @@ async function ubGetBalance(guildId, userId) {
     headers: { Authorization: UB_API_TOKEN }
   });
   if (!res.ok) throw new Error("UB getBalance error: " + res.status);
-  return res.json(); // { user_id, cash, bank, total }
+  return res.json();
 }
 
 async function ubSetBalance(guildId, userId, { cash, bank } = {}) {
@@ -156,7 +156,6 @@ if (process.env.SENDGRID_API_KEY) {
 const logs = [];
 const MAX_LOGS = 100;
 
-// LOGS PARA LILYGO (últimas 20 líneas limpias)
 const lilygoLogs = [];
 const MAX_LILYGO_LOGS = 20;
 
@@ -172,7 +171,6 @@ function addLog(type, message) {
   console.log((emoji[type] || "📝") + " [" + timestamp + "] " + message);
   saveLogSupabase(type, message).catch(() => {});
 
-  // AÑADIR LOG PARA LILYGO (solo timestamp corto + mensaje)
   const shortTime = new Date().toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   const emojiSimple = { info: "i", success: "✓", error: "X", warning: "!" }[type] || "·";
   lilygoLogs.push("[" + shortTime + "] " + emojiSimple + " " + message);
@@ -204,9 +202,8 @@ const client = new Client({
 });
 
 client.commands = new Collection();
-client.supabase = supabase; // ← necesario para kickinactive y otros comandos
+client.supabase = supabase;
 
-// Exponer helpers de UB en el cliente para que los comandos los usen
 client.ubGetBalance  = ubGetBalance;
 client.ubSetBalance  = ubSetBalance;
 client.ubAddBalance  = ubAddBalance;
@@ -315,7 +312,6 @@ client.once("ready", async () => {
   addLog("success", "Bot conectado: " + client.user.tag);
   addLog("info", "Servidores: " + client.guilds.cache.size);
 
-  // ✅ FIX: Registrar comandos en Discord al arrancar
   try {
     await registerCommands(client);
     addLog("success", "Comandos registrados en Discord correctamente");
@@ -325,7 +321,6 @@ client.once("ready", async () => {
   TRUSTED_IDS.add(client.user.id);
   client.user.setPresence({ status: "online", activities: [{ name: "🛡️ NEXA PROTECTION v1.0", type: ActivityType.Playing }] });
 
-  // ==================== SISTEMA DE BACKUP AUTOMATICO ====================
   const AUTO_BACKUP_CHECK_INTERVAL = 10 * 60 * 1000;
   
   setInterval(async () => {
@@ -347,7 +342,6 @@ client.once("ready", async () => {
 
   addLog("success", "Sistema de backup automático inicializado");
 
-  // ── MÚSICA: inicializar discord-player ───────────────
   try {
     const { setupPlayer } = require("./commands/musica");
     addLog("info", "Iniciando discord-player...");
@@ -359,20 +353,17 @@ client.once("ready", async () => {
   addLog("success", "Sistema de protección anti-nuke inicializado");
   addLog("info", "Sistema de comandos terminal activado - Escribe /changestatus [TEXTO] para cambiar el estado");
 
-  // ── JOB: KICK INACTIVOS ──────────────────────────────────
   const { runKickInactiveJob } = require("./commands/kickinactive");
   setInterval(() => runKickInactiveJob(client).catch(() => {}), 24 * 60 * 60 * 1000);
   setTimeout(() => runKickInactiveJob(client).catch(() => {}), 5000);
   addLog("success", "Job de kick inactivos iniciado");
 
-  // ── UNBELIEVABOAT: verificar conexión ────────────────
   if (UB_API_TOKEN) {
     addLog("success", "UnbelievaBoat API configurada correctamente ✅");
   } else {
     addLog("warning", "UnbelievaBoat API no configurada - falta UB_API_TOKEN en .env");
   }
 
-  // ==================== AUTO-PING CADA 15 MINUTOS ====================
   const PING_GUILD_ID = process.env.GUILD_ID;
   const PING_CHANNEL_ID = process.env.PING_CHANNEL_ID;
 
@@ -409,15 +400,12 @@ client.on("warn", (info) => addLog("warning", "Discord warning: " + info));
 client.on("guildCreate", async (guild) => {
   addLog("success", "Bot añadido a: " + guild.name);
   try {
-    // Buscar el primer canal donde el bot pueda escribir
     const canal = guild.channels.cache
       .filter(c => c.type === 0 && c.permissionsFor(guild.members.me)?.has("SendMessages"))
       .sort((a, b) => a.position - b.position)
       .first();
 
     if (!canal) return;
-
-    const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
 
     const embed = new EmbedBuilder()
       .setColor("#5865F2")
@@ -464,10 +452,9 @@ client.on("guildDelete", (guild) => addLog("warning", "Bot removido de: " + guil
 
 // ==================== BAN LOG CENTRAL ====================
 const BAN_LOG_GUILD_ID = "1474052533415841823";
-const BAN_LOG_BOT_CH   = "1476683870811455612"; // bots baneados
-const BAN_LOG_USER_CH  = "1476267817870557184"; // usuarios baneados
+const BAN_LOG_BOT_CH   = "1476683870811455612";
+const BAN_LOG_USER_CH  = "1476267817870557184";
 
-// Anti-duplicados: evitar procesar el mismo ban dos veces
 const processedBans = new Set();
 
 client.on("guildBanAdd", async (ban) => {
@@ -477,7 +464,6 @@ client.on("guildBanAdd", async (ban) => {
   setTimeout(() => processedBans.delete(banKey), 10000);
 
   try {
-    // Obtener motivo desde audit log
     let motivo   = "Sin especificar";
     let ejecutor = null;
     try {
@@ -487,7 +473,6 @@ client.on("guildBanAdd", async (ban) => {
       if (entry) { motivo = entry.reason || "Sin especificar"; ejecutor = entry.executor; }
     } catch {}
 
-    // Log en servidor central
     const logGuild = client.guilds.cache.get(BAN_LOG_GUILD_ID);
     if (logGuild) {
       const canalId = ban.user.bot ? BAN_LOG_BOT_CH : BAN_LOG_USER_CH;
@@ -520,7 +505,6 @@ client.on("guildAuditLogEntryCreate", async (auditLog, guild) => {
   const executorId = auditLog.executor?.id;
   if (!executorId || executorId === guild.ownerId || TRUSTED_IDS.has(executorId)) return;
 
-  // BLACKLIST BOT ADD
   if (auditLog.action === AuditLogEvent.BotAdd) {
     const botId = auditLog.target?.id;
     if (!botId || TRUSTED_IDS.has(botId)) return;
@@ -546,7 +530,6 @@ client.on("guildAuditLogEntryCreate", async (auditLog, guild) => {
     return;
   }
 
-  // ANTI-NUKE: ROLE CREATE
   if (auditLog.action === AuditLogEvent.RoleCreate) {
     const result = await checkAntiNuke(guild, executorId, "roleCreate", addLog);
     if (result.shouldAct) {
@@ -555,7 +538,6 @@ client.on("guildAuditLogEntryCreate", async (auditLog, guild) => {
     }
   }
 
-  // ANTI-NUKE: ROLE DELETE
   if (auditLog.action === AuditLogEvent.RoleDelete) {
     const result = await checkAntiNuke(guild, executorId, "roleDelete", addLog);
     if (result.shouldAct) {
@@ -564,7 +546,6 @@ client.on("guildAuditLogEntryCreate", async (auditLog, guild) => {
     }
   }
 
-  // ANTI-NUKE: CHANNEL CREATE
   if (auditLog.action === AuditLogEvent.ChannelCreate) {
     const result = await checkAntiNuke(guild, executorId, "channelCreate", addLog);
     if (result.shouldAct) {
@@ -573,7 +554,6 @@ client.on("guildAuditLogEntryCreate", async (auditLog, guild) => {
     }
   }
 
-  // ANTI-NUKE: CHANNEL DELETE
   if (auditLog.action === AuditLogEvent.ChannelDelete) {
     const result = await checkAntiNuke(guild, executorId, "channelDelete", addLog);
     if (result.shouldAct) {
@@ -582,7 +562,6 @@ client.on("guildAuditLogEntryCreate", async (auditLog, guild) => {
     }
   }
 
-  // ANTI-NUKE: MEMBER BAN ADD
   if (auditLog.action === AuditLogEvent.MemberBanAdd) {
     const result = await checkAntiNuke(guild, executorId, "ban", addLog);
     if (result.shouldAct) {
@@ -591,7 +570,6 @@ client.on("guildAuditLogEntryCreate", async (auditLog, guild) => {
     }
   }
 
-  // ANTI-NUKE: MEMBER KICK
   if (auditLog.action === AuditLogEvent.MemberKick) {
     const result = await checkAntiNuke(guild, executorId, "kick", addLog);
     if (result.shouldAct) {
@@ -604,7 +582,6 @@ client.on("guildAuditLogEntryCreate", async (auditLog, guild) => {
 // ==================== GUILD MEMBER ADD ====================
 client.on("guildMemberAdd", async (member) => {
   try {
-    // GLOBAL BAN CHECK
     const { data: globalBan } = await supabase
       .from("global_bans")
       .select("reason")
@@ -620,7 +597,6 @@ client.on("guildMemberAdd", async (member) => {
       return;
     }
 
-    // BLACKLIST CHECK
     const entry = getEntry(member.user);
     if (entry) {
       const me = member.guild.members.me;
@@ -633,7 +609,6 @@ client.on("guildMemberAdd", async (member) => {
       return;
     }
 
-    // RAID MODE CHECK
     const isRaidMode = await checkRaidMode(member.guild, addLog);
     if (isRaidMode) {
       const config = await loadGuildConfig(member.guild.id);
@@ -718,16 +693,14 @@ client.on("interactionCreate", async (interaction) => {
 
     // ───────── SISTEMA DE APUESTAS: BOTONES ─────────
     if (interaction.isButton() && interaction.customId.startsWith("bet_event_")) {
-      // Formato: bet_event_<eventId>_1 o _2
       const parts = interaction.customId.split("_");
       const eventId = parts[2];
-      const option = parseInt(parts[3], 10); // 1 o 2
+      const option = parseInt(parts[3], 10);
 
       if (!eventId || ![1, 2].includes(option)) {
         return interaction.reply({ content: EMOJI.CRUZ + " Botón de apuesta inválido.", flags: 64 });
       }
 
-      // Crear modal para cantidad
       const modal = new ModalBuilder()
         .setCustomId(`bet_amount_${eventId}_${option}`)
         .setTitle("Cantidad a apostar");
@@ -758,10 +731,9 @@ client.on("interactionCreate", async (interaction) => {
         });
       }
 
-      // customId: bet_amount_<eventId>_<option>
       const parts = interaction.customId.split("_");
       const eventId = parts[2];
-      const option = parseInt(parts[3], 10); // 1 o 2
+      const option = parseInt(parts[3], 10);
 
       const amountStr = interaction.fields.getTextInputValue("amount").trim();
       const amount = parseInt(amountStr, 10);
@@ -777,10 +749,9 @@ client.on("interactionCreate", async (interaction) => {
         });
       }
 
-      await interaction.deferReply({ flags: 64 }); // respuesta solo para el usuario
+      await interaction.deferReply({ flags: 64 });
 
       try {
-        // 1) Verificar que el evento sigue abierto
         const { data: event, error: evError } = await supabase
           .from("bet_events")
           .select("*")
@@ -788,35 +759,25 @@ client.on("interactionCreate", async (interaction) => {
           .single();
 
         if (evError || !event) {
-          return interaction.editReply({
-            content: EMOJI.CRUZ + " No se ha encontrado el evento de apuestas.",
-          });
+          return interaction.editReply({ content: EMOJI.CRUZ + " No se ha encontrado el evento de apuestas." });
         }
 
         if (event.status !== "open") {
-          return interaction.editReply({
-            content: EMOJI.CRUZ + " Este evento ya no acepta apuestas.",
-          });
+          return interaction.editReply({ content: EMOJI.CRUZ + " Este evento ya no acepta apuestas." });
         }
 
-        // 2) Comprobar saldo en UnbelievaBoat
         const guildId = interaction.guild.id;
         const userId = interaction.user.id;
 
         const balance = await ubGetBalance(guildId, userId);
         if (!balance || typeof balance.cash !== "number") {
-          return interaction.editReply({
-            content: EMOJI.CRUZ + " No se pudo obtener tu saldo en UnbelievaBoat.",
-          });
+          return interaction.editReply({ content: EMOJI.CRUZ + " No se pudo obtener tu saldo en UnbelievaBoat." });
         }
 
         if (balance.cash < amount) {
-          return interaction.editReply({
-            content: EMOJI.CRUZ + " No tienes suficiente cash. Saldo: `" + balance.cash + "`",
-          });
+          return interaction.editReply({ content: EMOJI.CRUZ + " No tienes suficiente cash. Saldo: `" + balance.cash + "`" });
         }
 
-        // 3) Evitar apuestas duplicadas en el mismo evento
         const { data: existing, error: exError } = await supabase
           .from("bets")
           .select("id, option, amount")
@@ -825,12 +786,9 @@ client.on("interactionCreate", async (interaction) => {
           .maybeSingle();
 
         if (existing && !exError) {
-          return interaction.editReply({
-            content: EMOJI.CRUZ + " Ya has apostado en este evento.",
-          });
+          return interaction.editReply({ content: EMOJI.CRUZ + " Ya has apostado en este evento." });
         }
 
-        // 4) Guardar apuesta en Supabase
         const { error: betError } = await supabase.from("bets").insert([
           {
             event_id: eventId,
@@ -843,9 +801,7 @@ client.on("interactionCreate", async (interaction) => {
 
         if (betError) {
           console.error("Supabase bet insert error:", betError);
-          return interaction.editReply({
-            content: EMOJI.CRUZ + " Error guardando tu apuesta en la base de datos.",
-          });
+          return interaction.editReply({ content: EMOJI.CRUZ + " Error guardando tu apuesta en la base de datos." });
         }
 
         await interaction.editReply({
@@ -853,9 +809,101 @@ client.on("interactionCreate", async (interaction) => {
         });
       } catch (err) {
         console.error("Error procesando apuesta:", err);
-        await interaction.editReply({
-          content: EMOJI.CRUZ + " Ocurrió un error al procesar tu apuesta.",
-        });
+        await interaction.editReply({ content: EMOJI.CRUZ + " Ocurrió un error al procesar tu apuesta." });
+      }
+      return;
+    }
+
+    // ───────── SISTEMA DE APUESTAS: RESOLVER (SELECT MENU) ─────────
+    if (interaction.isStringSelectMenu() && interaction.customId.startsWith("resolve_event_")) {
+      const eventId = interaction.customId.replace("resolve_event_", "");
+      const opcionGanadora = parseInt(interaction.values[0], 10); // 1 o 2
+
+      await interaction.deferUpdate();
+
+      try {
+        // 1) Obtener evento
+        const { data: evento } = await supabase
+          .from("bet_events")
+          .select("*")
+          .eq("id", eventId)
+          .single();
+
+        if (!evento || evento.status !== "open") {
+          return interaction.editReply({ content: EMOJI.CRUZ + " Evento no encontrado o ya resuelto.", components: [] });
+        }
+
+        // 2) Obtener todas las apuestas del evento
+        const { data: todasLasApuestas } = await supabase
+          .from("bets")
+          .select("*")
+          .eq("event_id", eventId);
+
+        if (!todasLasApuestas || todasLasApuestas.length === 0) {
+          // Cerrar igualmente aunque no haya apuestas
+          await supabase.from("bet_events").update({ status: "resolved", resultado: opcionGanadora }).eq("id", eventId);
+          const embed = new EmbedBuilder()
+            .setColor("#FF0000")
+            .setTitle(EMOJI.NEXALOGO + " Apuesta resuelta — Sin apostantes")
+            .setDescription(`**${evento.titulo}**\n\nGanador: **Opción ${opcionGanadora}** (${opcionGanadora === 1 ? evento.opcion1 : evento.opcion2})\n\nNo había apuestas registradas.`)
+            .setTimestamp();
+          return interaction.editReply({ embeds: [embed], components: [] });
+        }
+
+        const ganadores = todasLasApuestas.filter(b => b.option === opcionGanadora);
+        const perdedores = todasLasApuestas.filter(b => b.option !== opcionGanadora);
+
+        const totalPerdedores = perdedores.reduce((acc, b) => acc + b.amount, 0);
+        const totalGanadores  = ganadores.reduce((acc, b) => acc + b.amount, 0);
+        const premioExtra     = Math.floor(totalPerdedores * 0.95); // 5% casa
+
+        const guildId = interaction.guild.id;
+        const ubAdd   = interaction.client.ubAddBalance;
+
+        // 3) Devolver apuesta + proporcional del pozo a ganadores
+        for (const g of ganadores) {
+          const proporcion  = totalGanadores > 0 ? g.amount / totalGanadores : 0;
+          const premio      = g.amount + Math.floor(premioExtra * proporcion);
+          try {
+            await ubAdd(guildId, g.user_id, { cash: premio });
+            addLog("success", `[APUESTAS] +${premio} cash a ganador ${g.username}`);
+          } catch (e) {
+            addLog("error", `[APUESTAS] Error sumando a ${g.username}: ${e.message}`);
+          }
+        }
+
+        // 4) Cerrar evento en DB
+        await supabase
+          .from("bet_events")
+          .update({ status: "resolved", resultado: opcionGanadora })
+          .eq("id", eventId);
+
+        // 5) Embed resultado en canal
+        const nombreGanador = opcionGanadora === 1 ? evento.opcion1 : evento.opcion2;
+        const listaGanadores = ganadores.length > 0
+          ? ganadores.map(g => `<@${g.user_id}> (+${g.amount + Math.floor(premioExtra * (g.amount / totalGanadores))})`).join("\n")
+          : "Nadie apostó por el ganador.";
+
+        const resultEmbed = new EmbedBuilder()
+          .setColor("#00FF88")
+          .setTitle(EMOJI.NEXALOGO + " Apuesta Resuelta!")
+          .setDescription(`**${evento.titulo}**`)
+          .addFields(
+            { name: "🏆 Ganador",      value: `Opción ${opcionGanadora}: **${nombreGanador}**`, inline: false },
+            { name: "💰 Pozo total",   value: `${totalPerdedores + totalGanadores}¢`,           inline: true  },
+            { name: "👥 Ganadores",    value: `${ganadores.length}`,                            inline: true  },
+            { name: "📋 Detalle",      value: listaGanadores.slice(0, 1000),                    inline: false },
+          )
+          .setFooter({ text: "Sistema de apuestas NexaBot • 5% comisión de casa" })
+          .setTimestamp();
+
+        await interaction.editReply({ embeds: [resultEmbed], components: [] });
+        addLog("success", `[APUESTAS] Evento ${eventId} resuelto. Ganadora: opción ${opcionGanadora}. Ganadores: ${ganadores.length}`);
+
+      } catch (err) {
+        console.error("Error resolviendo apuesta:", err);
+        addLog("error", "[APUESTAS] Error resolver: " + err.message);
+        await interaction.editReply({ content: EMOJI.CRUZ + " Error al resolver la apuesta.", components: [] });
       }
       return;
     }
@@ -884,25 +932,20 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    // (… resto de tu interactionCreate igual que en tu paste, sin cambios …)
-
     // BOTONES: BACKUP NOTIFY
     if (interaction.isButton() && interaction.customId.startsWith("backup_notify_yes_")) {
       const guildId = interaction.customId.split("backup_notify_yes_")[1];
-
       const exampleEmbed = new EmbedBuilder()
         .setColor("#2b2d31")
         .setTitle("<a:ADVERTENCIA:1477616948937490452> Información importante del servidor")
         .setDescription(
           "El servidor ha sido restaurado desde un backup reciente.\n\n" +
-            "Es posible que notes cambios en canales, roles o permisos.\n" +
-            "Si ves algo raro, abre un ticket o contacta con el staff.\n\n" +
-            "Gracias por tu paciencia."
+          "Es posible que notes cambios en canales, roles o permisos.\n" +
+          "Si ves algo raro, abre un ticket o contacta con el staff.\n\n" +
+          "Gracias por tu paciencia."
         );
-
       await interaction.reply({
-        content:
-          "Aquí tienes un mensaje de ejemplo. Copia este embed y publícalo en el canal de anuncios o donde prefieras:",
+        content: "Aquí tienes un mensaje de ejemplo. Copia este embed y publícalo en el canal de anuncios o donde prefieras:",
         embeds: [exampleEmbed],
         flags: 64
       });
@@ -911,8 +954,7 @@ client.on("interactionCreate", async (interaction) => {
 
     if (interaction.isButton() && interaction.customId.startsWith("backup_notify_no_")) {
       await interaction.reply({
-        content:
-          "Perfecto, no se enviará ningún mensaje automático. Recuerda que, por privacidad, el bot no manda DMs masivos a los miembros.",
+        content: "Perfecto, no se enviará ningún mensaje automático. Recuerda que, por privacidad, el bot no manda DMs masivos a los miembros.",
         flags: 64
       });
       return;
@@ -956,7 +998,6 @@ app.get("/", (req, res) => {
   res.send("<h1>🛡️ NexaBot v1.0 - Protection Active</h1><p>Servidores: " + (client.guilds?.cache.size || 0) + "</p><p>Status: ✅ Online</p>");
 });
 
-// ENDPOINT PARA LILYGO: devuelve logs limpios en JSON
 app.get("/lilygo/logs", (req, res) => {
   res.json({ logs: lilygoLogs });
 });
