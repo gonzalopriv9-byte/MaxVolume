@@ -308,8 +308,86 @@ rl.on('line', (line) => {
 });
 
 // ==================== READY ====================
-client.once("ready", async () => {
-  addLog("success", "Bot conectado: " + client.user.tag);
+client.on('ready', async () => {
+  addLog('success', `Bot conectado ${client.user.tag}`);
+  addLog('info', `Servidores: ${client.guilds.cache.size}`);
+  
+  try {
+    await registerCommands(client);
+    addLog('success', 'Comandos registrados en Discord correctamente');
+  } catch (e) {
+    addLog('error', `Error registrando comandos: ${e.message}`);
+  }
+
+  TRUSTEDIDS.add(client.user.id);
+  client.user.setPresence({
+    status: 'online',
+    activities: [{ name: 'NEXA PROTECTION v1.0', type: ActivityType.Playing }]
+  });
+
+  // === NUEVO: Realtime - Cerrar apuestas al empezar evento ===
+  const sportsChannel = supabase.channel('sports');
+  sportsChannel
+    .on('postgres_changes', { 
+      event: 'UPDATE', 
+      schema: 'public', 
+      table: 'sports_events', 
+      filter: "status=eq.closed" 
+    }, async (payload) => {
+      if (payload.new.bet_event_id) {
+        await supabase.from('bet_events').update({ status: 'closed' }).eq('id', payload.new.bet_event_id);
+        addLog('info', `[AUTO] Apuesta ${payload.new.bet_event_id} cerrada`);
+      }
+    })
+    .subscribe();
+
+  // === NUEVO: Auto-sync deportes cada 5min ===
+  setInterval(async () => {
+    const apiKey = process.env.SPORTSDB_API_KEY;
+    if (!apiKey) return;
+    
+    const today = new Date().toISOString().slice(0, 10);
+    const res = await fetch(`https://www.thesportsdb.com/api/v1/json/${apiKey}/eventsday.php?d=${today}`);
+    const data = await res.json();
+    
+    if (data.events) {
+      const events = data.events.map(e => ({
+        event_id: e.idEvent,
+        titulo: `${e.strEvent}`,
+        fecha_utc: new Date(`${e.dateEvent} ${e.strTime}`).toISOString(),
+        league: e.strLeague
+      }));
+      await supabase.from('sports_events').upsert(events, { onConflict: 'event_id' });
+      addLog('info', `[SPORTS] Auto-sync: ${events.length} eventos`);
+    }
+  }, 300000); // 5min
+
+  addLog('success', 'Sistema Sports Realtime + Auto-sync inicializado');
+
+  // ===== TODO LO DEMÁS IGUAL QUE TENÍAS =====
+  const AUTOBACKUPCHECKINTERVAL = 10 * 60 * 1000;
+  setInterval(async () => {
+    try {
+      await checkAndRunAutoBackups(client, addLog);
+    } catch (e) {
+      addLog('error', `Error en intervalo de autobackup: ${e.message}`);
+    }
+  }, AUTOBACKUPCHECKINTERVAL);
+
+  setTimeout(async () => {
+    try {
+      addLog('info', 'Verificando backups automáticos pendientes...');
+      await checkAndRunAutoBackups(client, addLog);
+    } catch (e) {
+      addLog('error', `Error en primera verificación de autobackup: ${e.message}`);
+    }
+  }, 60000);
+
+  addLog('success', 'Sistema de backup automático inicializado');
+
+  // ... (resto de tu código ready(): discord-player, anti-nuke, jobs, auto-ping, etc. MANTÉN TODO IGUAL)
+});
+
   addLog("info", "Servidores: " + client.guilds.cache.size);
 
   try {
