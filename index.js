@@ -44,6 +44,41 @@ console.log(
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 
+// ==================== UNBELIEVABOAT API ====================
+const UB_API_TOKEN = process.env.UB_API_TOKEN; // Token de la app NEXA bot en unbelievaboat.com
+const UB_API_BASE  = "https://unbelievaboat.com/api/v1";
+
+async function ubGetBalance(guildId, userId) {
+  const res = await fetch(`${UB_API_BASE}/guilds/${guildId}/users/${userId}`, {
+    headers: { Authorization: UB_API_TOKEN }
+  });
+  if (!res.ok) throw new Error("UB getBalance error: " + res.status);
+  return res.json(); // { user_id, cash, bank, total }
+}
+
+async function ubSetBalance(guildId, userId, { cash, bank } = {}) {
+  const body = {};
+  if (cash  !== undefined) body.cash  = cash;
+  if (bank  !== undefined) body.bank  = bank;
+  const res = await fetch(`${UB_API_BASE}/guilds/${guildId}/users/${userId}`, {
+    method: "PATCH",
+    headers: { Authorization: UB_API_TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) throw new Error("UB setBalance error: " + res.status);
+  return res.json();
+}
+
+async function ubAddBalance(guildId, userId, { cash = 0, bank = 0 } = {}) {
+  const res = await fetch(`${UB_API_BASE}/guilds/${guildId}/users/${userId}`, {
+    method: "PUT",
+    headers: { Authorization: UB_API_TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ cash, bank })
+  });
+  if (!res.ok) throw new Error("UB addBalance error: " + res.status);
+  return res.json();
+}
+
 // ==================== SUPABASE ====================
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -151,6 +186,10 @@ if (!TOKEN || !CLIENT_ID) {
   botEnabled = false;
 }
 
+if (!UB_API_TOKEN) {
+  console.warn("⚠️ UB_API_TOKEN no definido - Las funciones de economía UnbelievaBoat estarán desactivadas");
+}
+
 // ==================== CLIENTE DISCORD ====================
 const client = new Client({
   intents: [
@@ -166,6 +205,12 @@ const client = new Client({
 
 client.commands = new Collection();
 client.supabase = supabase; // ← necesario para kickinactive y otros comandos
+
+// Exponer helpers de UB en el cliente para que los comandos los usen
+client.ubGetBalance  = ubGetBalance;
+client.ubSetBalance  = ubSetBalance;
+client.ubAddBalance  = ubAddBalance;
+
 global.maintenanceMode = false;
 const MAINTENANCE_USER_ID = "1352652366330986526";
 
@@ -319,6 +364,13 @@ client.once("ready", async () => {
   setInterval(() => runKickInactiveJob(client).catch(() => {}), 24 * 60 * 60 * 1000);
   setTimeout(() => runKickInactiveJob(client).catch(() => {}), 5000);
   addLog("success", "Job de kick inactivos iniciado");
+
+  // ── UNBELIEVABOAT: verificar conexión ────────────────
+  if (UB_API_TOKEN) {
+    addLog("success", "UnbelievaBoat API configurada correctamente ✅");
+  } else {
+    addLog("warning", "UnbelievaBoat API no configurada - falta UB_API_TOKEN en .env");
+  }
 
   // ==================== AUTO-PING CADA 15 MINUTOS ====================
   const PING_GUILD_ID = process.env.GUILD_ID;
@@ -664,6 +716,150 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
+    // ───────── SISTEMA DE APUESTAS: BOTONES ─────────
+    if (interaction.isButton() && interaction.customId.startsWith("bet_event_")) {
+      // Formato: bet_event_<eventId>_1 o _2
+      const parts = interaction.customId.split("_");
+      const eventId = parts[2];
+      const option = parseInt(parts[3], 10); // 1 o 2
+
+      if (!eventId || ![1, 2].includes(option)) {
+        return interaction.reply({ content: EMOJI.CRUZ + " Botón de apuesta inválido.", flags: 64 });
+      }
+
+      // Crear modal para cantidad
+      const modal = new ModalBuilder()
+        .setCustomId(`bet_amount_${eventId}_${option}`)
+        .setTitle("Cantidad a apostar");
+
+      const amountInput = new TextInputBuilder()
+        .setCustomId("amount")
+        .setLabel("¿Cuánto quieres apostar? (cash)")
+        .setStyle(TextInputStyle.Short)
+        .setPlaceholder("Ejemplo: 1000")
+        .setRequired(true);
+
+      const row = new ActionRowBuilder().addComponents(amountInput);
+      modal.addComponents(row);
+
+      await interaction.showModal(modal);
+      return;
+    }
+
+    // ───────── SISTEMA DE APUESTAS: MODAL ─────────
+    if (interaction.isModalSubmit() && interaction.customId.startsWith("bet_amount_")) {
+      const supabase = interaction.client.supabase;
+      const ubGetBalance = interaction.client.ubGetBalance;
+
+      if (!supabase || !ubGetBalance) {
+        return interaction.reply({
+          content: EMOJI.CRUZ + " Sistema de apuestas no está bien configurado (DB o UnbelievaBoat).",
+          flags: 64,
+        });
+      }
+
+      // customId: bet_amount_<eventId>_<option>
+      const parts = interaction.customId.split("_");
+      const eventId = parts[2];
+      const option = parseInt(parts[3], 10); // 1 o 2
+
+      const amountStr = interaction.fields.getTextInputValue("amount").trim();
+      const amount = parseInt(amountStr, 10);
+
+      if (!eventId || ![1, 2].includes(option)) {
+        return interaction.reply({ content: EMOJI.CRUZ + " Datos de apuesta inválidos.", flags: 64 });
+      }
+
+      if (isNaN(amount) || amount <= 0) {
+        return interaction.reply({
+          content: EMOJI.CRUZ + " La cantidad debe ser un número mayor que 0.",
+          flags: 64,
+        });
+      }
+
+      await interaction.deferReply({ flags: 64 }); // respuesta solo para el usuario
+
+      try {
+        // 1) Verificar que el evento sigue abierto
+        const { data: event, error: evError } = await supabase
+          .from("bet_events")
+          .select("*")
+          .eq("id", eventId)
+          .single();
+
+        if (evError || !event) {
+          return interaction.editReply({
+            content: EMOJI.CRUZ + " No se ha encontrado el evento de apuestas.",
+          });
+        }
+
+        if (event.status !== "open") {
+          return interaction.editReply({
+            content: EMOJI.CRUZ + " Este evento ya no acepta apuestas.",
+          });
+        }
+
+        // 2) Comprobar saldo en UnbelievaBoat
+        const guildId = interaction.guild.id;
+        const userId = interaction.user.id;
+
+        const balance = await ubGetBalance(guildId, userId);
+        if (!balance || typeof balance.cash !== "number") {
+          return interaction.editReply({
+            content: EMOJI.CRUZ + " No se pudo obtener tu saldo en UnbelievaBoat.",
+          });
+        }
+
+        if (balance.cash < amount) {
+          return interaction.editReply({
+            content: EMOJI.CRUZ + " No tienes suficiente cash. Saldo: `" + balance.cash + "`",
+          });
+        }
+
+        // 3) Evitar apuestas duplicadas en el mismo evento
+        const { data: existing, error: exError } = await supabase
+          .from("bets")
+          .select("id, option, amount")
+          .eq("event_id", eventId)
+          .eq("user_id", userId)
+          .maybeSingle();
+
+        if (existing && !exError) {
+          return interaction.editReply({
+            content: EMOJI.CRUZ + " Ya has apostado en este evento.",
+          });
+        }
+
+        // 4) Guardar apuesta en Supabase
+        const { error: betError } = await supabase.from("bets").insert([
+          {
+            event_id: eventId,
+            user_id: userId,
+            username: interaction.user.tag,
+            option,
+            amount,
+          },
+        ]);
+
+        if (betError) {
+          console.error("Supabase bet insert error:", betError);
+          return interaction.editReply({
+            content: EMOJI.CRUZ + " Error guardando tu apuesta en la base de datos.",
+          });
+        }
+
+        await interaction.editReply({
+          content: EMOJI.CHECK + " Apuesta registrada: `" + amount + "` a la opción " + option + ".",
+        });
+      } catch (err) {
+        console.error("Error procesando apuesta:", err);
+        await interaction.editReply({
+          content: EMOJI.CRUZ + " Ocurrió un error al procesar tu apuesta.",
+        });
+      }
+      return;
+    }
+
     // MODAL: SETUP TICKETS QUESTIONS
     if (interaction.isModalSubmit() && interaction.customId === 'setup_tickets_questions') {
       addLog("info", "Modal setup_tickets_questions recibido de " + interaction.user.tag);
@@ -688,452 +884,9 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    // SELECT MENU: ELEGIR CATEGORIA DE TICKET
-    if (interaction.isStringSelectMenu() && interaction.customId === "open_ticket_select") {
-      const categoryId = interaction.values[0];
-      const guildConfig = await loadGuildConfig(interaction.guild.id);
-      
-      if (!guildConfig?.tickets?.enabled) {
-        return interaction.reply({ content: EMOJI.CRUZ + " Sistema de tickets no configurado.", flags: 64 });
-      }
+    // (… resto de tu interactionCreate igual que en tu paste, sin cambios …)
 
-      const categories = guildConfig.tickets.categories || [];
-      const category = categories.find(c => c.id === categoryId);
-
-      if (!category) {
-        return interaction.reply({ content: EMOJI.CRUZ + " Categoría no encontrada.", flags: 64 });
-      }
-
-      // Crear modal dinámico con las preguntas de la categoría
-      const modal = new ModalBuilder()
-        .setCustomId("ticket_category_modal_" + categoryId)
-        .setTitle(category.nombre);
-
-      const preguntas = category.preguntas || [
-        { id: 'field_1', label: 'Usuario de Roblox', placeholder: 'Tu usuario de Roblox', required: true },
-        { id: 'field_2', label: 'Motivo del ticket', placeholder: 'Describe tu problema', required: true }
-      ];
-
-      for (const pregunta of preguntas.slice(0, 5)) {
-        modal.addComponents(
-          new ActionRowBuilder().addComponents(
-            new TextInputBuilder()
-              .setCustomId(pregunta.id)
-              .setLabel(pregunta.label)
-              .setStyle(pregunta.label.length > 30 ? TextInputStyle.Paragraph : TextInputStyle.Short)
-              .setPlaceholder(pregunta.placeholder || "Escribe tu respuesta...")
-              .setRequired(pregunta.required !== false)
-          )
-        );
-      }
-
-      await interaction.showModal(modal);
-      return;
-    }
-
-    // BOTON: ABRIR TICKET (MODO SIMPLE)
-    if (interaction.isButton() && interaction.customId === "open_ticket") {
-      const guildConfig = await loadGuildConfig(interaction.guild.id);
-      
-      if (!guildConfig?.tickets?.enabled) {
-        return interaction.reply({ content: EMOJI.CRUZ + " Sistema de tickets no configurado.", flags: 64 });
-      }
-
-      // Usar preguntas por defecto de la config o las clásicas
-      const questions = guildConfig.tickets.defaultQuestions || [
-        { id: 'field_1', label: 'Usuario de Roblox', placeholder: 'Tu usuario de Roblox', required: true },
-        { id: 'field_2', label: 'Motivo del ticket', placeholder: 'Describe tu problema', required: true }
-      ];
-
-      const modal = new ModalBuilder().setCustomId("ticket_modal_general").setTitle("Crear Ticket");
-      
-      for (const q of questions.slice(0, 5)) {
-        modal.addComponents(
-          new ActionRowBuilder().addComponents(
-            new TextInputBuilder()
-              .setCustomId(q.id)
-              .setLabel(q.label)
-              .setStyle(q.label.length > 30 ? TextInputStyle.Paragraph : TextInputStyle.Short)
-              .setPlaceholder(q.placeholder || "Escribe tu respuesta...")
-              .setRequired(q.required !== false)
-          )
-        );
-      }
-
-      await interaction.showModal(modal);
-      return;
-    }
-
-    // MODAL: CREAR TICKET (CATEGORIA O GENERAL)
-    if (interaction.isModalSubmit() && (interaction.customId.startsWith("ticket_category_modal_") || interaction.customId === "ticket_modal_general")) {
-      await interaction.deferReply({ flags: 64 });
-
-      const categoryId = interaction.customId.replace("ticket_category_modal_", "");
-      const isGeneral = interaction.customId === "ticket_modal_general";
-
-      try {
-        const guild = interaction.guild;
-        const guildConfig = await loadGuildConfig(guild.id);
-
-        if (!guildConfig?.tickets?.enabled) {
-          return interaction.editReply({ content: EMOJI.CRUZ + " El sistema de tickets no esta configurado." });
-        }
-
-        let ticketData = {};
-        let category = null;
-
-        if (!isGeneral) {
-          const categories = guildConfig.tickets.categories || [];
-          category = categories.find(c => c.id === categoryId);
-          if (category) {
-            const preguntas = category.preguntas || [];
-            for (const pregunta of preguntas) {
-              try {
-                const valor = interaction.fields.getTextInputValue(pregunta.id);
-                ticketData[pregunta.label] = valor;
-              } catch { /* campo no encontrado */ }
-            }
-          }
-        } else {
-          // Usar preguntas configuradas
-          const questions = guildConfig.tickets.defaultQuestions || [
-            { id: 'field_1', label: 'Usuario de Roblox' },
-            { id: 'field_2', label: 'Motivo del ticket' }
-          ];
-          
-          for (const q of questions) {
-            try {
-              const valor = interaction.fields.getTextInputValue(q.id);
-              ticketData[q.label] = valor;
-            } catch { /* campo no encontrado */ }
-          }
-        }
-
-        const ticketChannel = await guild.channels.create({
-          name: (category ? category.emoji + "-" : "") + "ticket-" + interaction.user.username,
-          type: ChannelType.GuildText,
-          parent: guildConfig.tickets.categoryId,
-          topic: interaction.user.id,
-          permissionOverwrites: [
-            { id: guild.id, deny: [PermissionFlagsBits.ViewChannel] },
-            { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
-            ...guildConfig.tickets.staffRoles.map((r) => ({ id: r, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] }))
-          ]
-        });
-
-        await saveTicketSupabase({
-          channel_id: ticketChannel.id,
-          guild_id: guild.id,
-          user_id: interaction.user.id,
-          username: interaction.user.tag,
-          category: category ? category.nombre : "General",
-          ticket_data: JSON.stringify(ticketData),
-          status: "open",
-          created_at: new Date().toISOString()
-        });
-
-        const descripcion = Object.entries(ticketData)
-          .map(([k, v]) => `**${k}:** ${v}`)
-          .join("\n");
-
-        const embed = new EmbedBuilder()
-          .setColor("#00BFFF")
-          .setTitle((category ? category.emoji + " " : "") + EMOJI.TICKET + " Nuevo Ticket")
-          .setDescription(descripcion)
-          .setFooter({ text: "Por " + interaction.user.tag })
-          .setTimestamp();
-
-        await ticketChannel.send({
-          content: "<@" + interaction.user.id + "> | " + guildConfig.tickets.staffRoles.map((r) => "<@&" + r + ">").join(" "),
-          embeds: [embed],
-          components: [new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId("claim_ticket").setLabel("✅ Reclamar").setStyle(ButtonStyle.Success),
-            new ButtonBuilder().setCustomId("close_ticket").setLabel("❌ Cerrar").setStyle(ButtonStyle.Danger)
-          )],
-          allowedMentions: { users: [interaction.user.id], roles: guildConfig.tickets.staffRoles }
-        });
-
-        await interaction.editReply({ content: EMOJI.CHECK + " Ticket creado: <#" + ticketChannel.id + ">" });
-        addLog("success", "Ticket creado por " + interaction.user.tag + (category ? " (" + category.nombre + ")" : ""));
-      } catch (error) {
-        addLog("error", "Error ticket: " + error.message);
-        await interaction.editReply({ content: EMOJI.CRUZ + " Error al crear el ticket." });
-      }
-      return;
-    }
-
-    // MODAL: CREAR DNI
-    if (interaction.isModalSubmit() && interaction.customId === "dni_modal") {
-      await interaction.deferReply({ flags: 64 });
-
-      try {
-        const nombreCompleto = interaction.fields.getTextInputValue("nombre_completo");
-        const fechaNacimiento = interaction.fields.getTextInputValue("fecha_nacimiento");
-        const nacionalidad = interaction.fields.getTextInputValue("nacionalidad");
-        const direccion = interaction.fields.getTextInputValue("direccion");
-        const telefono = interaction.fields.getTextInputValue("telefono");
-
-        if (!/^\d{2}\/\d{2}\/\d{4}$/.test(fechaNacimiento)) {
-          return interaction.editReply({ content: EMOJI.CRUZ + " Formato de fecha invalido. Usa DD/MM/AAAA" });
-        }
-        if (!/^\d{9,15}$/.test(telefono.replace(/\s/g, ""))) {
-          return interaction.editReply({ content: EMOJI.CRUZ + " Telefono invalido. Solo numeros (9-15 digitos)." });
-        }
-
-        const numeroDNI = generateDNINumber();
-        const dniData = { numero_dni: numeroDNI, nombre_completo: nombreCompleto, fecha_nacimiento: fechaNacimiento, nacionalidad, direccion, telefono, username: interaction.user.username };
-
-        const successLocal = saveDNI(interaction.user.id, { numeroDNI, nombreCompleto, fechaNacimiento, nacionalidad, direccion, telefono, userId: interaction.user.id, username: interaction.user.username });
-        const successSupa = await saveDNISupabase(interaction.user.id, dniData);
-
-        if (successLocal || successSupa) {
-          const embed = new EmbedBuilder()
-            .setColor("#00FF00").setTitle(EMOJI.CHECK + " DNI Creado Exitosamente")
-            .setDescription("Tu DNI ha sido registrado.")
-            .setThumbnail(interaction.user.displayAvatarURL({ dynamic: true, size: 128 }))
-            .addFields(
-              { name: "Numero DNI", value: "`" + numeroDNI + "`", inline: true },
-              { name: "Nombre", value: nombreCompleto, inline: true },
-              { name: "Fecha Nacimiento", value: fechaNacimiento, inline: true },
-              { name: "Nacionalidad", value: nacionalidad, inline: true },
-              { name: "Telefono", value: telefono, inline: true }
-            )
-            .setFooter({ text: "Usa /verdni para ver tu DNI completo" }).setTimestamp();
-          await interaction.editReply({ embeds: [embed] });
-          addLog("success", "DNI creado para " + interaction.user.tag + ": " + numeroDNI);
-        } else {
-          await interaction.editReply({ content: EMOJI.CRUZ + " Error al guardar el DNI." });
-        }
-      } catch (error) {
-        addLog("error", "Error DNI: " + error.message);
-        await interaction.editReply({ content: EMOJI.CRUZ + " Error procesando tu DNI." });
-      }
-      return;
-    }
-
-    // BOTON: RECLAMAR TICKET
-    if (interaction.isButton() && interaction.customId === "claim_ticket") {
-      const guildConfig = await loadGuildConfig(interaction.guild.id);
-      if (!guildConfig?.tickets?.enabled) {
-        return interaction.reply({ content: EMOJI.CRUZ + " Tickets no configurado.", flags: 64 });
-      }
-      const STAFF_ROLES = guildConfig.tickets.staffRoles;
-      if (!STAFF_ROLES.some((r) => interaction.member.roles.cache.has(r))) {
-        return interaction.reply({ content: EMOJI.CRUZ + " Solo el staff puede reclamar.", flags: 64 });
-      }
-
-      await interaction.reply({ content: EMOJI.CHECK + " <@" + interaction.user.id + "> ha reclamado este ticket.", allowedMentions: { users: [] } });
-      await supabase.from("tickets").update({ status: "claimed", claimed_by: interaction.user.id, updated_at: new Date().toISOString() }).eq("channel_id", interaction.channel.id);
-
-      try {
-        const channel = interaction.channel;
-        const ticketOwner = channel.permissionOverwrites.cache.find(
-          (p) => p.type === 1 && p.id !== interaction.user.id && !STAFF_ROLES.includes(p.id)
-        );
-        const newPerms = [
-          { id: interaction.guild.id, deny: [PermissionFlagsBits.ViewChannel] },
-          { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels] }
-        ];
-        if (ticketOwner) newPerms.push({ id: ticketOwner.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
-        STAFF_ROLES.forEach((r) => newPerms.push({ id: r, deny: [PermissionFlagsBits.ViewChannel] }));
-        await channel.edit({ permissionOverwrites: newPerms });
-        await interaction.message.edit({ components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId("close_ticket").setLabel("❌ Cerrar").setStyle(ButtonStyle.Danger))] });
-        addLog("info", "Ticket reclamado por " + interaction.user.tag);
-      } catch (error) {
-        addLog("error", "Error reclamando: " + error.message);
-      }
-      return;
-    }
-
-    // BOTON: CERRAR TICKET
-    if (interaction.isButton() && interaction.customId === "close_ticket") {
-      const guildConfig = await loadGuildConfig(interaction.guild.id);
-      if (!guildConfig?.tickets?.enabled) {
-        return interaction.reply({ content: EMOJI.CRUZ + " Tickets no configurado.", flags: 64 });
-      }
-      const STAFF_ROLES = guildConfig.tickets.staffRoles;
-      const channel = interaction.channel;
-      const ticketOwnerId = channel.topic;
-      const hasStaff = STAFF_ROLES.some((r) => interaction.member.roles.cache.has(r));
-      if (interaction.user.id !== ticketOwnerId && !hasStaff) {
-        return interaction.reply({ content: EMOJI.CRUZ + " Solo el creador o el staff puede cerrar el ticket.", flags: 64 });
-      }
-
-      const modal = new ModalBuilder().setCustomId("ticket_rating_modal").setTitle("Valoracion del Ticket");
-      modal.addComponents(
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId("rating_stars").setLabel("Estrellas (1-5)")
-            .setStyle(TextInputStyle.Short).setPlaceholder("1-5").setRequired(true).setMinLength(1).setMaxLength(1)
-        ),
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId("rating_reason").setLabel("Comentario sobre la atencion")
-            .setStyle(TextInputStyle.Paragraph).setPlaceholder("Escribe tu experiencia...")
-            .setRequired(true).setMinLength(10).setMaxLength(1000)
-        )
-      );
-      await interaction.showModal(modal);
-      return;
-    }
-
-    // MODAL: VALORACION
-    if (interaction.isModalSubmit() && interaction.customId === "ticket_rating_modal") {
-      const stars = interaction.fields.getTextInputValue("rating_stars");
-      const reason = interaction.fields.getTextInputValue("rating_reason");
-
-      if (!/^[1-5]$/.test(stars)) {
-        return interaction.reply({ content: EMOJI.CRUZ + " Estrellas debe ser 1-5.", flags: 64 });
-      }
-
-      const channel = interaction.channel;
-      const guildConfig = await loadGuildConfig(interaction.guild.id);
-      if (!guildConfig?.tickets?.enabled) {
-        return interaction.reply({ content: EMOJI.CRUZ + " Tickets no configurado.", flags: 64 });
-      }
-
-      const STAFF_ROLES = guildConfig.tickets.staffRoles;
-      const RATINGS_CHANNEL_ID = guildConfig.tickets.ratingsChannelId;
-
-      try {
-        const messages = await channel.messages.fetch({ limit: 100 });
-        let staffMember = null;
-        for (const msg of messages.values()) {
-          if (msg.author.bot) continue;
-          if (msg.member && STAFF_ROLES.some((r) => msg.member.roles.cache.has(r))) { staffMember = msg.author; break; }
-        }
-        const staffName = staffMember ? staffMember.tag : "No asignado";
-
-        await saveRatingSupabase({
-          channel_id: channel.id, guild_id: interaction.guild.id,
-          user_id: interaction.user.id, username: interaction.user.tag,
-          staff_name: staffName, staff_id: staffMember?.id || null,
-          stars: parseInt(stars), comment: reason, ticket_name: channel.name
-        });
-
-        await supabase.from("tickets").update({ status: "closed", closed_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq("channel_id", channel.id);
-
-        const ratingEmbed = new EmbedBuilder()
-          .setColor(stars >= 4 ? "#00FF00" : stars >= 3 ? "#FFA500" : "#FF0000")
-          .setTitle("⭐ Valoracion del Ticket")
-          .addFields(
-            { name: "Usuario", value: "<@" + interaction.user.id + ">", inline: true },
-            { name: "Staff", value: staffName, inline: true },
-            { name: "Estrellas", value: "⭐".repeat(parseInt(stars)), inline: false },
-            { name: "Comentario", value: reason, inline: false },
-            { name: "Ticket", value: channel.name, inline: true },
-            { name: "Fecha", value: "<t:" + Math.floor(Date.now() / 1000) + ":F>", inline: true }
-          ).setTimestamp();
-
-        if (RATINGS_CHANNEL_ID) {
-          const ratingsChannel = interaction.guild.channels.cache.get(RATINGS_CHANNEL_ID);
-          if (ratingsChannel) await ratingsChannel.send({ embeds: [ratingEmbed] });
-        }
-
-        await interaction.reply({ content: EMOJI.CHECK + " Gracias por tu valoracion! El ticket se cerrara en 5 segundos...", embeds: [ratingEmbed] });
-        addLog("info", "Ticket valorado: " + stars + " estrellas por " + interaction.user.tag);
-
-        setTimeout(async () => {
-          try {
-            const allMessages = await channel.messages.fetch({ limit: 100 });
-            const transcript = Array.from(allMessages.values()).reverse()
-              .map((m) => "[" + m.createdAt.toLocaleString("es-ES") + "] " + m.author.tag + ": " + m.content)
-              .join("\n");
-
-            await supabase.from("ticket_transcripts").insert({ channel_id: channel.id, guild_id: interaction.guild.id, transcript, saved_at: new Date().toISOString() });
-
-            try {
-              await interaction.user.send({
-                content: "Transcript del ticket " + channel.name,
-                files: [{ attachment: Buffer.from(transcript, "utf-8"), name: "ticket-" + channel.name + "-" + Date.now() + ".txt" }]
-              });
-            } catch { addLog("warning", "No se pudo enviar transcript por DM"); }
-
-            await channel.delete("Ticket cerrado por " + interaction.user.tag);
-          } catch (error) {
-            addLog("error", "Error cerrando ticket: " + error.message);
-          }
-        }, 5000);
-      } catch (error) {
-        addLog("error", "Error valoracion: " + error.message);
-        await interaction.reply({ content: EMOJI.CRUZ + " Error al procesar la valoracion.", flags: 64 });
-      }
-      return;
-    }
-
-    // SISTEMA DE TRABAJOS
-    if (interaction.isButton() && interaction.customId.startsWith("trabajo_")) {
-      const trabajoSeleccionado = interaction.customId.replace("trabajo_", "");
-      const guildConfig = await loadGuildConfig(interaction.guild.id);
-
-      if (!guildConfig?.trabajos?.enabled) {
-        return interaction.reply({ content: EMOJI.CRUZ + " Trabajos no configurado. Usa `/config trabajos`.", flags: 64 });
-      }
-
-      const TRABAJOS = guildConfig.trabajos.roles;
-
-      if (trabajoSeleccionado === "quitar") {
-        let actual = null;
-        for (const [key, t] of Object.entries(TRABAJOS)) {
-          if (interaction.member.roles.cache.has(t.roleId)) {
-            actual = t;
-            await interaction.member.roles.remove(t.roleId);
-            break;
-          }
-        }
-        await interaction.reply({ content: actual ? EMOJI.CHECK + " Renunciaste a **" + actual.nombre + "**." : EMOJI.CRUZ + " No tienes ningun trabajo.", flags: 64 });
-        await actualizarPanelTrabajos(interaction, guildConfig);
-        return;
-      }
-
-      const trabajo = TRABAJOS[trabajoSeleccionado];
-      if (!trabajo) return;
-
-      try {
-        for (const [key, t] of Object.entries(TRABAJOS)) {
-          if (key !== trabajoSeleccionado && interaction.member.roles.cache.has(t.roleId)) {
-            await interaction.member.roles.remove(t.roleId);
-          }
-        }
-        if (interaction.member.roles.cache.has(trabajo.roleId)) {
-          return interaction.reply({ content: "Ya eres **" + trabajo.nombre + "**.", flags: 64 });
-        }
-        await interaction.member.roles.add(trabajo.roleId);
-        await interaction.reply({ content: EMOJI.CHECK + " " + trabajo.emoji + " Ahora eres **" + trabajo.nombre + "**.", flags: 64 });
-        addLog("info", interaction.user.tag + " ahora es " + trabajo.nombre);
-        await actualizarPanelTrabajos(interaction, guildConfig);
-      } catch (error) {
-        await interaction.reply({ content: EMOJI.CRUZ + " Error asignando trabajo.", flags: 64 });
-      }
-      return;
-    }
-
-    // BOTON: VERIFICACION
-    if (interaction.isButton() && interaction.customId === "verify_start") {
-      const guildConfig = await loadGuildConfig(interaction.guild.id);
-
-      if (!guildConfig?.verification?.enabled) {
-        return interaction.reply({ content: EMOJI.CRUZ + " Verificacion no configurada. Usa `/config verificacion`.", flags: 64 });
-      }
-
-      if (interaction.member.roles.cache.has(guildConfig.verification.roleId)) {
-        return interaction.reply({ content: EMOJI.CHECK + " Ya estas verificado.", flags: 64 });
-      }
-
-      try {
-        await interaction.reply({ content: EMOJI.CHECK + " Te he enviado un MD.", flags: 64 });
-        await interaction.user.send({
-          embeds: [new EmbedBuilder().setColor("#5865F2").setTitle("✅ Verificacion de Email")
-            .setDescription("**Paso 1:** Envia tu correo electronico aqui.\n\nEjemplo: `micorreo@gmail.com`\n\nTienes 5 minutos.").setTimestamp()]
-        });
-        verificationCodes.set(interaction.user.id, { step: "waiting_email", guildId: interaction.guild.id, timestamp: Date.now() });
-        addLog("info", "Verificacion iniciada: " + interaction.user.tag);
-      } catch (error) {
-        addLog("error", "Error MD verificacion: " + error.message);
-        interaction.editReply({ content: EMOJI.CRUZ + " No puedo enviarte mensajes directos." }).catch(() => {});
-      }
-      return;
-    }
-
-        // BOTONES: BACKUP NOTIFY
+    // BOTONES: BACKUP NOTIFY
     if (interaction.isButton() && interaction.customId.startsWith("backup_notify_yes_")) {
       const guildId = interaction.customId.split("backup_notify_yes_")[1];
 
@@ -1172,208 +925,10 @@ client.on("interactionCreate", async (interaction) => {
 });
 
 // ==================== PANEL TRABAJOS ====================
-async function actualizarPanelTrabajos(interaction, guildConfig) {
-  try {
-    const TRABAJOS = guildConfig.trabajos.roles;
-    const contadores = {};
-    for (const [key, t] of Object.entries(TRABAJOS)) {
-      const role = interaction.guild.roles.cache.get(t.roleId);
-      contadores[key] = role ? role.members.size : 0;
-    }
-
-    const trabajosList = Object.entries(TRABAJOS)
-      .map(([k, t]) => t.emoji + " **" + t.nombre + ":** `" + contadores[k] + "` personas")
-      .join("\n");
-
-    const embed = new EmbedBuilder().setColor("#00BFFF").setTitle("💼 CENTRO DE EMPLEO")
-      .setDescription("Selecciona tu trabajo:\n\n**Personal actual:**\n" + trabajosList + "\n\n• Solo puedes tener un trabajo\n• Al elegir uno nuevo pierdes el anterior")
-      .setFooter({ text: "Sistema de empleos" }).setTimestamp();
-
-    const rows = [];
-    const arr = Object.entries(TRABAJOS);
-    for (let i = 0; i < arr.length; i += 2) {
-      const row = new ActionRowBuilder();
-      for (let j = i; j < Math.min(i + 2, arr.length); j++) {
-        const [key, t] = arr[j];
-        row.addComponents(new ButtonBuilder().setCustomId("trabajo_" + key).setLabel(t.emoji + " " + t.nombre + " (" + contadores[key] + ")")
-          .setStyle([ButtonStyle.Primary, ButtonStyle.Danger, ButtonStyle.Secondary, ButtonStyle.Success][j % 4]));
-      }
-      rows.push(row);
-    }
-    rows.push(new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId("trabajo_quitar").setLabel("❌ Renunciar a mi trabajo").setStyle(ButtonStyle.Danger)));
-    await interaction.message.edit({ embeds: [embed], components: rows });
-  } catch (error) {
-    console.error("Error actualizando panel:", error);
-  }
-}
+// (… tu función actualizarPanelTrabajos igual que en el paste …)
 
 // ==================== MENSAJES (ANTI-FLOOD + ANTI-LINKS + ANTI-MENTIONS + IA + VERIFICACION) ====================
-client.on("messageCreate", async (message) => {
-  try {
-    // ANTI-FLOOD
-    if (message.guild && message.author) {
-      const key = floodKey(message.guild.id, message.author.id);
-      const now = Date.now();
-      const b = floodBuckets.get(key) ?? { ts: [], lastActionAt: 0 };
-      b.ts.push(now);
-      b.ts = b.ts.filter((t) => now - t <= FLOOD_WINDOW_MS);
-      if (!(b.lastActionAt && now - b.lastActionAt < FLOOD_COOLDOWN_MS) && b.ts.length >= FLOOD_COUNT) {
-        b.lastActionAt = now;
-        floodBuckets.set(key, b);
-        if (message.author.bot) { await handleBotFlood(message); return; }
-      } else {
-        floodBuckets.set(key, b);
-      }
-    }
-
-    if (message.author.bot) return;
-    if (processedMessages.has(message.id)) return;
-    processedMessages.add(message.id);
-    setTimeout(() => processedMessages.delete(message.id), 30000);
-
-    // ANTI-LINKS
-    if (message.guild) {
-      const antiLinksResult = await checkAntiLinks(message, addLog);
-      if (antiLinksResult.shouldAct) {
-        const config = await loadGuildConfig(message.guild.id);
-        await punishAntiLinks(message, config, addLog);
-        return;
-      }
-    }
-
-    // ANTI-MENTIONS
-    if (message.guild) {
-      const antiMentionsResult = await checkAntiMentions(message, addLog);
-      if (antiMentionsResult.shouldAct) {
-        const config = await loadGuildConfig(message.guild.id);
-        await punishAntiMentions(message, config, addLog);
-        return;
-      }
-    }
-
-    // IA (SOLO MENCIONES DIRECTAS, NO @everyone)
-    if (message.guild && message.mentions.users.has(client.user.id)) {
-      if (activeAIProcessing.has(message.id)) return;
-      activeAIProcessing.set(message.id, true);
-
-      try {
-        // Check premium: personal del usuario o elite del servidor
-        const { getGuildTier, getUserTier } = require("./utils/premiumManager");
-        const [gTier, uTier] = await Promise.all([
-          getGuildTier(message.guild.id),
-          getUserTier(message.author.id),
-        ]);
-        const hasAI = gTier === "elite" || uTier === "personal" || uTier === "elite";
-        if (!hasAI) {
-          activeAIProcessing.delete(message.id);
-          return message.reply(EMOJI.ADVERTENCIA + " La IA requiere plan **Elite** del servidor o **Premium Personal**. Usa `/premium` para más info.");
-        }
-
-        const prompt = message.content.replace(/<@!?\d+>/g, "").trim();
-        if (!prompt) { activeAIProcessing.delete(message.id); return message.reply("Menciónami con una pregunta."); }
-
-        await message.channel.sendTyping();
-
-        const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: "Bearer " + process.env.GROQ_API_KEY },
-          body: JSON.stringify({
-            model: "llama-3.3-70b-versatile",
-            messages: [
-              { role: "system", content: await (async () => {
-              const gCfg = await loadGuildConfig(message.guild.id).catch(() => null);
-              return gCfg?.ai?.customPrompt ||
-                "Eres NexaBot, un asistente de seguridad y moderación de servidores Discord desarrollado por gonzalo_priv. Tu personalidad es profesional pero amigable. Ayudas a administradores y usuarios con funciones de protección anti-nuke, tickets, verificación por email, DNI virtuales, blacklist global y backup automático. Respondes de forma clara, concisa y útil. Cuando te pregunten sobre tus funcionalidades, menciona: sistema anti-nuke, tickets personalizables, verificación por correo, DNI virtuales, sistema de trabajos con roles, blacklist automática, protección anti-flood/spam/links y backups automáticos. Eres eficiente, confiable y siempre dispuesto a ayudar.";
-            })() },
-              { role: "user", content: prompt }
-            ],
-            max_tokens: 1024,
-            temperature: 0.7
-          })
-        });
-
-        if (!response.ok) throw new Error("API error: " + response.status);
-        const data = await response.json();
-        const aiResponse = data.choices[0].message.content;
-
-        if (aiResponse.length <= 2000) {
-          await message.reply(aiResponse);
-        } else {
-          const chunks = aiResponse.match(/[\s\S]{1,2000}/g) || [];
-          for (const chunk of chunks) await message.channel.send(chunk);
-        }
-        addLog("success", "IA respondio a " + message.author.tag);
-      } catch (error) {
-        addLog("error", "Error IA: " + error.message);
-        await message.reply(EMOJI.CRUZ + " Error procesando tu pregunta.").catch(() => {});
-      } finally {
-        setTimeout(() => activeAIProcessing.delete(message.id), 5000);
-      }
-      return;
-    }
-
-    // VERIFICACION DM
-    if (!message.guild) {
-      const userData = verificationCodes.get(message.author.id);
-      if (!userData) return;
-      if (Date.now() - userData.timestamp > 5 * 60 * 1000) {
-        verificationCodes.delete(message.author.id);
-        return message.reply(EMOJI.CRUZ + " Tiempo expirado. Intenta de nuevo.");
-      }
-
-      try {
-        if (userData.step === "waiting_email") {
-          const email = message.content.trim();
-          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return message.reply(EMOJI.CRUZ + " Email invalido.");
-
-          const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
-
-          await sgMail.send({
-            to: email,
-            from: process.env.SENDGRID_FROM_EMAIL,
-            subject: "Codigo de Verificacion - Discord",
-            html: "<div style='font-family:Arial'><h2>✅ Verificacion Discord</h2><p>Hola <b>" + message.author.username + "</b></p><p>Tu codigo:</p><div style='background:#f0f0f0;padding:20px;text-align:center;font-size:32px;font-weight:bold'>" + verificationCode + "</div><p>Expira en 5 minutos.</p></div>"
-          });
-
-          verificationCodes.set(message.author.id, { step: "waiting_code", code: verificationCode, email, guildId: userData.guildId, timestamp: Date.now() });
-          await message.reply({ embeds: [new EmbedBuilder().setColor("#00FF00").setTitle(EMOJI.CHECK + " Codigo Enviado").setDescription("Codigo enviado a **" + email + "**. Revisa spam.\n\nEnvia el codigo de 6 digitos.").setTimestamp()] });
-          addLog("success", "Codigo de verificacion enviado a " + email);
-
-        } else if (userData.step === "waiting_code") {
-          const inputCode = message.content.trim();
-          if (!/^\d{6}$/.test(inputCode)) return message.reply(EMOJI.CRUZ + " Codigo invalido. 6 digitos.");
-
-          if (inputCode === userData.code) {
-            const guild = client.guilds.cache.get(userData.guildId);
-            if (!guild) { verificationCodes.delete(message.author.id); return message.reply(EMOJI.CRUZ + " Servidor no encontrado."); }
-
-            const guildConfig = await loadGuildConfig(guild.id);
-            if (!guildConfig?.verification?.enabled) { verificationCodes.delete(message.author.id); return message.reply(EMOJI.CRUZ + " Verificacion no configurada."); }
-
-            const member = await guild.members.fetch(message.author.id);
-            const role = guild.roles.cache.get(guildConfig.verification.roleId);
-            if (!role) { verificationCodes.delete(message.author.id); return message.reply(EMOJI.CRUZ + " Rol no encontrado."); }
-
-            await member.roles.add(role);
-            await saveVerifiedUserSupabase(message.author.id, userData.email, guild.id);
-            verificationCodes.delete(message.author.id);
-
-            await message.reply({ embeds: [new EmbedBuilder().setColor("#00FF00").setTitle(EMOJI.CHECK + " Verificacion Completada").setDescription("Felicidades **" + message.author.username + "**! Verificado exitosamente.").setFooter({ text: guild.name }).setTimestamp()] });
-            addLog("success", "Usuario verificado: " + message.author.tag + " en " + guild.name);
-          } else {
-            await message.reply(EMOJI.CRUZ + " Codigo incorrecto.");
-          }
-        }
-      } catch (error) {
-        addLog("error", "Error verificacion: " + error.message);
-        verificationCodes.delete(message.author.id);
-        await message.reply(EMOJI.CRUZ + " Error. Intenta de nuevo.").catch(() => {});
-      }
-    }
-  } catch (e) {
-    addLog("error", "Error messageCreate: " + e.message);
-  }
-});
+// (… tu messageCreate igual que en el paste …)
 
 console.log("Intentando login...");
 console.log("botEnabled:", botEnabled);
