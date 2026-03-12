@@ -19,23 +19,30 @@ const EMOJI = {
   NEXALOGO:    "<a:NEXALOGO:1477286399345561682>",
 };
 
+// Map temporal para guardar títulos pendientes (se borra a los 10 min)
+const titulosPendientes = new Map();
+
 module.exports = {
   data: new SlashCommandBuilder()
     .setName("apostar")
     .setDescription("Crear un evento de apuestas")
     .addStringOption(opt =>
-      opt.setName("titulo").setDescription("Título del evento, ej: MADRID vs CITY").setRequired(true)
+      opt.setName("titulo")
+        .setDescription("Título del evento, ej: MADRID vs CITY")
+        .setRequired(true)
     )
     .addStringOption(opt =>
       opt.setName("opciones")
         .setDescription("Número de opciones (2 normal · 3-4 requiere suscripción Elite)")
         .setRequired(true)
         .addChoices(
-          { name: "2 opciones", value: "2" },
+          { name: "2 opciones",        value: "2" },
           { name: "3 opciones (Elite)", value: "3" },
           { name: "4 opciones (Elite)", value: "4" },
         )
     ),
+
+  titulosPendientes,
 
   async execute(interaction) {
     const supabase = interaction.client.supabase;
@@ -72,9 +79,13 @@ module.exports = {
       }
     }
 
+    // ── Guardar título en el Map temporal
+    titulosPendientes.set(interaction.user.id, titulo);
+    setTimeout(() => titulosPendientes.delete(interaction.user.id), 10 * 60 * 1000);
+
     // ── Mostrar modal para rellenar las opciones
     const modal = new ModalBuilder()
-      .setCustomId(`apostar_opciones_${numOpciones}_${encodeURIComponent(titulo)}`)
+      .setCustomId(`apostar_opciones_${numOpciones}`)
       .setTitle(`Opciones del evento (${numOpciones})`);
 
     for (let i = 1; i <= numOpciones; i++) {
