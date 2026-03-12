@@ -1,3 +1,5 @@
+console.log("✅ [COMMANDS] resolverapuesta.js CARGADO correctamente");
+
 const {
   SlashCommandBuilder,
   EmbedBuilder,
