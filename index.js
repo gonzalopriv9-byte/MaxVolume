@@ -322,7 +322,7 @@ client.once("ready", async () => {
   client.user.setPresence({ status: "online", activities: [{ name: "🛡️ NEXA PROTECTION v1.0", type: ActivityType.Playing }] });
 
   const AUTO_BACKUP_CHECK_INTERVAL = 10 * 60 * 1000;
-  
+
   setInterval(async () => {
     try {
       await checkAndRunAutoBackups(client, addLog);
@@ -370,28 +370,28 @@ client.once("ready", async () => {
   if (!PING_GUILD_ID || !PING_CHANNEL_ID) {
     addLog("warning", "Auto-ping desactivado: falta GUILD_ID o PING_CHANNEL_ID en .env");
   } else {
-  try {
-    const guild = await client.guilds.fetch(PING_GUILD_ID);
-    const channel = await guild.channels.fetch(PING_CHANNEL_ID);
+    try {
+      const guild = await client.guilds.fetch(PING_GUILD_ID);
+      const channel = await guild.channels.fetch(PING_CHANNEL_ID);
 
-    const doAutoPing = async () => {
-      try {
-        const sent = await channel.send({ content: "Pinging..." });
-        const latency = Math.abs(sent.createdTimestamp - Date.now());
-        await sent.edit(`🏓 Pong! Latencia: ${latency}ms`);
-        await channel.setName(`🤖ultimo-ping-${latency}ms`);
-        addLog("info", `[AUTO-PING] Latencia: ${latency}ms - Canal renombrado`);
-      } catch (error) {
-        addLog("error", "[AUTO-PING ERROR] " + error.message);
-      }
-    };
+      const doAutoPing = async () => {
+        try {
+          const sent = await channel.send({ content: "Pinging..." });
+          const latency = Math.abs(sent.createdTimestamp - Date.now());
+          await sent.edit(`🏓 Pong! Latencia: ${latency}ms`);
+          await channel.setName(`🤖ultimo-ping-${latency}ms`);
+          addLog("info", `[AUTO-PING] Latencia: ${latency}ms - Canal renombrado`);
+        } catch (error) {
+          addLog("error", "[AUTO-PING ERROR] " + error.message);
+        }
+      };
 
-    await doAutoPing();
-    setInterval(doAutoPing, 15 * 60 * 1000);
-    addLog("success", "Sistema de auto-ping activado (cada 15 minutos)");
-  } catch (error) {
-    addLog("error", "Error inicializando auto-ping: " + error.message);
-  }
+      await doAutoPing();
+      setInterval(doAutoPing, 15 * 60 * 1000);
+      addLog("success", "Sistema de auto-ping activado (cada 15 minutos)");
+    } catch (error) {
+      addLog("error", "Error inicializando auto-ping: " + error.message);
+    }
   }
 });
 
@@ -670,7 +670,7 @@ client.on("interactionCreate", async (interaction) => {
   console.log("Interaccion: " + (interaction.customId || interaction.commandName) + " en " + (interaction.guild?.name || "DM"));
 
   try {
-    // COMANDOS SLASH
+    // ── COMANDOS SLASH
     if (interaction.isChatInputCommand()) {
       if (global.maintenanceMode && interaction.user.id !== MAINTENANCE_USER_ID) {
         return interaction.reply({ content: "El bot esta en mantenimiento.", flags: 64 });
@@ -691,13 +691,114 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
+    // ───────── APOSTAR: MODAL OPCIONES ─────────
+    if (interaction.isModalSubmit() && interaction.customId.startsWith("apostar_opciones_")) {
+      const numOpciones = parseInt(interaction.customId.split("_")[2], 10);
+
+      const apostarCmd = client.commands.get("apostar");
+      const titulo = apostarCmd?.titulosPendientes?.get(interaction.user.id) || "Sin título";
+      apostarCmd?.titulosPendientes?.delete(interaction.user.id);
+
+      const opciones = [];
+      for (let i = 1; i <= numOpciones; i++) {
+        opciones.push(interaction.fields.getTextInputValue(`opcion${i}`));
+      }
+
+      await interaction.deferReply({ flags: 64 });
+
+      const emojiOpciones = ["🅰️", "🅱️", "🅲", "🅳"];
+      const colores = [ButtonStyle.Success, ButtonStyle.Danger, ButtonStyle.Primary, ButtonStyle.Secondary];
+
+      try {
+        const embedFields = opciones.map((op, i) => ({
+          name: `Opción ${i + 1}`,
+          value: `${emojiOpciones[i]} ${op}`,
+          inline: true,
+        }));
+        embedFields.push({ name: "Estado", value: "`ABIERTA`", inline: false });
+
+        const embed = new EmbedBuilder()
+          .setColor("#00BFFF")
+          .setTitle(`${EMOJI.NEXALOGO} Evento de apuestas`)
+          .setDescription(
+            `**${titulo}**\n\n` +
+            `Pulsa un botón para apostar por tu opción.\n` +
+            `Cada apuesta usará tu saldo de UnbelievaBoat (cash).`
+          )
+          .addFields(embedFields)
+          .setFooter({ text: "Sistema de apuestas NexaBot + UnbelievaBoat" })
+          .setTimestamp();
+
+        const tempRow = new ActionRowBuilder().addComponents(
+          opciones.map((op, i) =>
+            new ButtonBuilder()
+              .setCustomId(`bet_event_pending_${i + 1}`)
+              .setLabel(`Apostar por ${op}`)
+              .setStyle(colores[i])
+          )
+        );
+
+        const msg = await interaction.channel.send({ embeds: [embed], components: [tempRow] });
+
+        const insertData = {
+          guild_id:   interaction.guild.id,
+          channel_id: interaction.channel.id,
+          message_id: msg.id,
+          titulo,
+          opcion1: opciones[0],
+          opcion2: opciones[1],
+          status: "open",
+        };
+        if (opciones[2]) insertData.opcion3 = opciones[2];
+        if (opciones[3]) insertData.opcion4 = opciones[3];
+
+        const { data, error } = await supabase
+          .from("bet_events")
+          .insert([insertData])
+          .select()
+          .single();
+
+        if (error || !data) {
+          console.error("Supabase bet_events insert error:", error);
+          return interaction.editReply({ content: `${EMOJI.CRUZ} Error guardando el evento en la base de datos.` });
+        }
+
+        const eventId = data.id;
+
+        const realRow = new ActionRowBuilder().addComponents(
+          opciones.map((op, i) =>
+            new ButtonBuilder()
+              .setCustomId(`bet_event_${eventId}_${i + 1}`)
+              .setLabel(`Apostar por ${op}`)
+              .setStyle(colores[i])
+          )
+        );
+        await msg.edit({ components: [realRow] });
+
+        await interaction.editReply({
+          content:
+            `${EMOJI.CHECK} **Evento de apuestas creado correctamente.**\n\n` +
+            `> 🆔 **ID del evento:** \`${eventId}\`\n` +
+            `> ${EMOJI.ADVERTENCIA} **Guarda este ID**, lo necesitarás para dar el resultado con \`/resolverapuesta\`.\n` +
+            `> ${EMOJI.NEXALOGO} El evento ya es visible en el canal.`,
+        });
+
+        addLog("success", "[APUESTAS] Evento creado: " + titulo + " (ID: " + eventId + ") por " + interaction.user.tag);
+
+      } catch (err) {
+        console.error("Error creando apuesta desde modal:", err);
+        await interaction.editReply({ content: `${EMOJI.CRUZ} Ocurrió un error creando el evento.` });
+      }
+      return;
+    }
+
     // ───────── SISTEMA DE APUESTAS: BOTONES ─────────
     if (interaction.isButton() && interaction.customId.startsWith("bet_event_")) {
       const parts = interaction.customId.split("_");
       const eventId = parts[2];
       const option = parseInt(parts[3], 10);
 
-      if (!eventId || ![1, 2].includes(option)) {
+      if (!eventId || isNaN(option)) {
         return interaction.reply({ content: EMOJI.CRUZ + " Botón de apuesta inválido.", flags: 64 });
       }
 
@@ -719,18 +820,8 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    // ───────── SISTEMA DE APUESTAS: MODAL ─────────
+    // ───────── SISTEMA DE APUESTAS: MODAL CANTIDAD ─────────
     if (interaction.isModalSubmit() && interaction.customId.startsWith("bet_amount_")) {
-      const supabase = interaction.client.supabase;
-      const ubGetBalance = interaction.client.ubGetBalance;
-
-      if (!supabase || !ubGetBalance) {
-        return interaction.reply({
-          content: EMOJI.CRUZ + " Sistema de apuestas no está bien configurado (DB o UnbelievaBoat).",
-          flags: 64,
-        });
-      }
-
       const parts = interaction.customId.split("_");
       const eventId = parts[2];
       const option = parseInt(parts[3], 10);
@@ -738,7 +829,7 @@ client.on("interactionCreate", async (interaction) => {
       const amountStr = interaction.fields.getTextInputValue("amount").trim();
       const amount = parseInt(amountStr, 10);
 
-      if (!eventId || ![1, 2].includes(option)) {
+      if (!eventId || isNaN(option)) {
         return interaction.reply({ content: EMOJI.CRUZ + " Datos de apuesta inválidos.", flags: 64 });
       }
 
@@ -767,7 +858,7 @@ client.on("interactionCreate", async (interaction) => {
         }
 
         const guildId = interaction.guild.id;
-        const userId = interaction.user.id;
+        const userId  = interaction.user.id;
 
         const balance = await ubGetBalance(guildId, userId);
         if (!balance || typeof balance.cash !== "number") {
@@ -789,15 +880,13 @@ client.on("interactionCreate", async (interaction) => {
           return interaction.editReply({ content: EMOJI.CRUZ + " Ya has apostado en este evento." });
         }
 
-        const { error: betError } = await supabase.from("bets").insert([
-          {
-            event_id: eventId,
-            user_id: userId,
-            username: interaction.user.tag,
-            option,
-            amount,
-          },
-        ]);
+        const { error: betError } = await supabase.from("bets").insert([{
+          event_id: eventId,
+          user_id:  userId,
+          username: interaction.user.tag,
+          option,
+          amount,
+        }]);
 
         if (betError) {
           console.error("Supabase bet insert error:", betError);
@@ -817,12 +906,11 @@ client.on("interactionCreate", async (interaction) => {
     // ───────── SISTEMA DE APUESTAS: RESOLVER (SELECT MENU) ─────────
     if (interaction.isStringSelectMenu() && interaction.customId.startsWith("resolve_event_")) {
       const eventId = interaction.customId.replace("resolve_event_", "");
-      const opcionGanadora = parseInt(interaction.values[0], 10); // 1 o 2
+      const opcionGanadora = parseInt(interaction.values[0], 10);
 
       await interaction.deferUpdate();
 
       try {
-        // 1) Obtener evento
         const { data: evento } = await supabase
           .from("bet_events")
           .select("*")
@@ -833,55 +921,47 @@ client.on("interactionCreate", async (interaction) => {
           return interaction.editReply({ content: EMOJI.CRUZ + " Evento no encontrado o ya resuelto.", components: [] });
         }
 
-        // 2) Obtener todas las apuestas del evento
         const { data: todasLasApuestas } = await supabase
           .from("bets")
           .select("*")
           .eq("event_id", eventId);
 
         if (!todasLasApuestas || todasLasApuestas.length === 0) {
-          // Cerrar igualmente aunque no haya apuestas
           await supabase.from("bet_events").update({ status: "resolved", resultado: opcionGanadora }).eq("id", eventId);
           const embed = new EmbedBuilder()
             .setColor("#FF0000")
             .setTitle(EMOJI.NEXALOGO + " Apuesta resuelta — Sin apostantes")
-            .setDescription(`**${evento.titulo}**\n\nGanador: **Opción ${opcionGanadora}** (${opcionGanadora === 1 ? evento.opcion1 : evento.opcion2})\n\nNo había apuestas registradas.`)
+            .setDescription(`**${evento.titulo}**\n\nGanador: **Opción ${opcionGanadora}** (${evento[`opcion${opcionGanadora}`]})\n\nNo había apuestas registradas.`)
             .setTimestamp();
           return interaction.editReply({ embeds: [embed], components: [] });
         }
 
-        const ganadores = todasLasApuestas.filter(b => b.option === opcionGanadora);
-        const perdedores = todasLasApuestas.filter(b => b.option !== opcionGanadora);
-
+        const ganadores      = todasLasApuestas.filter(b => b.option === opcionGanadora);
+        const perdedores     = todasLasApuestas.filter(b => b.option !== opcionGanadora);
         const totalPerdedores = perdedores.reduce((acc, b) => acc + b.amount, 0);
         const totalGanadores  = ganadores.reduce((acc, b) => acc + b.amount, 0);
-        const premioExtra     = Math.floor(totalPerdedores * 0.95); // 5% casa
+        const premioExtra     = Math.floor(totalPerdedores * 0.95);
 
-        const guildId = interaction.guild.id;
-        const ubAdd   = interaction.client.ubAddBalance;
-
-        // 3) Devolver apuesta + proporcional del pozo a ganadores
         for (const g of ganadores) {
-          const proporcion  = totalGanadores > 0 ? g.amount / totalGanadores : 0;
-          const premio      = g.amount + Math.floor(premioExtra * proporcion);
+          const proporcion = totalGanadores > 0 ? g.amount / totalGanadores : 0;
+          const premio     = g.amount + Math.floor(premioExtra * proporcion);
           try {
-            await ubAdd(guildId, g.user_id, { cash: premio });
+            await ubAddBalance(interaction.guild.id, g.user_id, { cash: premio });
             addLog("success", `[APUESTAS] +${premio} cash a ganador ${g.username}`);
           } catch (e) {
             addLog("error", `[APUESTAS] Error sumando a ${g.username}: ${e.message}`);
           }
         }
 
-        // 4) Cerrar evento en DB
-        await supabase
-          .from("bet_events")
-          .update({ status: "resolved", resultado: opcionGanadora })
-          .eq("id", eventId);
+        await supabase.from("bet_events").update({ status: "resolved", resultado: opcionGanadora }).eq("id", eventId);
 
-        // 5) Embed resultado en canal
-        const nombreGanador = opcionGanadora === 1 ? evento.opcion1 : evento.opcion2;
+        const nombreGanador  = evento[`opcion${opcionGanadora}`] || `Opción ${opcionGanadora}`;
         const listaGanadores = ganadores.length > 0
-          ? ganadores.map(g => `<@${g.user_id}> (+${g.amount + Math.floor(premioExtra * (g.amount / totalGanadores))})`).join("\n")
+          ? ganadores.map(g => {
+              const proporcion = g.amount / totalGanadores;
+              const premio     = g.amount + Math.floor(premioExtra * proporcion);
+              return `<@${g.user_id}> (+${premio})`;
+            }).join("\n")
           : "Nadie apostó por el ganador.";
 
         const resultEmbed = new EmbedBuilder()
@@ -889,10 +969,10 @@ client.on("interactionCreate", async (interaction) => {
           .setTitle(EMOJI.NEXALOGO + " Apuesta Resuelta!")
           .setDescription(`**${evento.titulo}**`)
           .addFields(
-            { name: "🏆 Ganador",      value: `Opción ${opcionGanadora}: **${nombreGanador}**`, inline: false },
-            { name: "💰 Pozo total",   value: `${totalPerdedores + totalGanadores}¢`,           inline: true  },
-            { name: "👥 Ganadores",    value: `${ganadores.length}`,                            inline: true  },
-            { name: "📋 Detalle",      value: listaGanadores.slice(0, 1000),                    inline: false },
+            { name: "🏆 Ganador",    value: `Opción ${opcionGanadora}: **${nombreGanador}**`, inline: false },
+            { name: "💰 Pozo total", value: `${totalPerdedores + totalGanadores}¢`,           inline: true  },
+            { name: "👥 Ganadores",  value: `${ganadores.length}`,                            inline: true  },
+            { name: "📋 Detalle",    value: listaGanadores.slice(0, 1000),                    inline: false },
           )
           .setFooter({ text: "Sistema de apuestas NexaBot • 5% comisión de casa" })
           .setTimestamp();
@@ -908,7 +988,7 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    // MODAL: SETUP TICKETS QUESTIONS
+    // ── MODAL: SETUP TICKETS
     if (interaction.isModalSubmit() && interaction.customId === 'setup_tickets_questions') {
       addLog("info", "Modal setup_tickets_questions recibido de " + interaction.user.tag);
       const setupCommand = client.commands.get('setup');
@@ -932,12 +1012,11 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    // BOTONES: BACKUP NOTIFY
+    // ── BOTONES: BACKUP NOTIFY
     if (interaction.isButton() && interaction.customId.startsWith("backup_notify_yes_")) {
-      const guildId = interaction.customId.split("backup_notify_yes_")[1];
       const exampleEmbed = new EmbedBuilder()
         .setColor("#2b2d31")
-        .setTitle("<a:ADVERTENCIA:1477616948937490452> Información importante del servidor")
+        .setTitle(EMOJI.ADVERTENCIA + " Información importante del servidor")
         .setDescription(
           "El servidor ha sido restaurado desde un backup reciente.\n\n" +
           "Es posible que notes cambios en canales, roles o permisos.\n" +
