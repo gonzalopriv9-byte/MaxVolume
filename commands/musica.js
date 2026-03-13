@@ -1,5 +1,5 @@
 // commands/musica.js
-// Spotify + YouTube (yt-dlp) + ElevenLabs DJ + Autocola IA
+// Spotify + YouTube (yt-dlp) + ElevenLabs DJ + Autocola + Barra de progreso
 
 const { SlashCommandBuilder, EmbedBuilder } = require("discord.js");
 const {
@@ -11,12 +11,11 @@ const {
   entersState,
   StreamType,
 } = require("@discordjs/voice");
-const playdl  = require("play-dl");
+const playdl   = require("play-dl");
 const { spawn } = require("child_process");
-const https   = require("https");
-const http    = require("http");
-const fs      = require("fs");
-const path    = require("path");
+const https    = require("https");
+const fs       = require("fs");
+const path     = require("path");
 const { createClient } = require("@supabase/supabase-js");
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
@@ -30,6 +29,35 @@ const EMOJI = {
 
 const TMP_DIR = "/tmp/nexabot_tts";
 if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BARRA DE PROGRESO
+// ─────────────────────────────────────────────────────────────────────────────
+function buildProgressBar(elapsed, total, size = 20) {
+  if (!total || total <= 0) return "▓".repeat(size);
+  const pct      = Math.min(elapsed / total, 1);
+  const filled   = Math.round(pct * size);
+  const empty    = size - filled;
+  const bar      = "▓".repeat(filled) + "░".repeat(empty);
+  const pctLabel = Math.floor(pct * 100) + "%";
+  return `\`[${bar}] ${pctLabel}\``;
+}
+
+function fmtTime(secs) {
+  if (!secs || secs < 0) return "0:00";
+  const m = Math.floor(secs / 60);
+  const s = Math.floor(secs % 60);
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function parseDuration(dur) {
+  // dur puede ser "3:45" o "1:03:45"
+  if (!dur) return 0;
+  const parts = dur.split(":").map(Number);
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  return 0;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SPOTIFY
@@ -93,6 +121,7 @@ async function searchSpotify(query) {
             spotifyId:   track.id,
             thumbnail:   track.album.images?.[0]?.url || null,
             duration:    msToTime(track.duration_ms),
+            durationSec: Math.floor(track.duration_ms / 1000),
           });
         } catch (e) { reject(new Error("Error Spotify: " + e.message)); }
       });
@@ -100,7 +129,6 @@ async function searchSpotify(query) {
   });
 }
 
-// Recomendaciones de Spotify basadas en un track ID
 async function getSpotifyRecommendations(seedTrackId, limit = 5) {
   const token = await getSpotifyToken();
   return new Promise((resolve, reject) => {
@@ -113,7 +141,8 @@ async function getSpotifyRecommendations(seedTrackId, limit = 5) {
       res.on("data", c => data += c);
       res.on("end", () => {
         try {
-          const tracks = JSON.parse(data)?.tracks || [];
+          const parsed = JSON.parse(data || "{}");
+          const tracks = parsed?.tracks || [];
           resolve(tracks.map(t => ({
             searchQuery: `${t.artists[0].name} - ${t.name}`,
             title:       `${t.artists[0].name} - ${t.name}`,
@@ -122,6 +151,7 @@ async function getSpotifyRecommendations(seedTrackId, limit = 5) {
             spotifyId:   t.id,
             thumbnail:   t.album.images?.[0]?.url || null,
             duration:    msToTime(t.duration_ms),
+            durationSec: Math.floor(t.duration_ms / 1000),
             isAutocola:  true,
           })));
         } catch (e) { reject(new Error("Error recomendaciones: " + e.message)); }
@@ -149,9 +179,7 @@ async function saveToHistory(guildId, userId, track) {
       spotify_id:  track.spotifyId || null,
       played_at:   new Date().toISOString(),
     });
-  } catch (e) {
-    console.error("[Musica] Error guardando historial:", e.message);
-  }
+  } catch (e) { console.error("[Musica] Error historial:", e.message); }
 }
 
 async function getRecentHistory(guildId, limit = 10) {
@@ -163,10 +191,7 @@ async function getRecentHistory(guildId, limit = 10) {
       .order("played_at", { ascending: false })
       .limit(limit);
     return data || [];
-  } catch (e) {
-    console.error("[Musica] Error leyendo historial:", e.message);
-    return [];
-  }
+  } catch (e) { return []; }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -180,21 +205,14 @@ const DJ_PHRASES = [
   "Y sin parar la música, aquí viene {artist}!",
   "Para los amantes del buen gusto, {artist}!",
 ];
-
 const AUTOCOLA_PHRASES = [
   "Ya que no hay más peticiones, os sugiero algunas cosas basadas en vuestras últimas peticiones",
   "La cola se ha vaciado, pero yo sigo aquí! Os pongo algo basado en lo que habéis estado escuchando",
   "Sin peticiones nuevas, me encargo yo! Os traigo recomendaciones personalizadas",
 ];
 
-function getDJPhrase(artist) {
-  const phrase = DJ_PHRASES[Math.floor(Math.random() * DJ_PHRASES.length)];
-  return phrase.replace("{artist}", artist);
-}
-
-function getAutocolaPhrase() {
-  return AUTOCOLA_PHRASES[Math.floor(Math.random() * AUTOCOLA_PHRASES.length)];
-}
+const getDJPhrase    = a => DJ_PHRASES[Math.floor(Math.random() * DJ_PHRASES.length)].replace("{artist}", a);
+const getAutocolaPhrase = () => AUTOCOLA_PHRASES[Math.floor(Math.random() * AUTOCOLA_PHRASES.length)];
 
 async function generateTTS(text) {
   const apiKey  = process.env.ELEVENLABS_API_KEY;
@@ -202,22 +220,20 @@ async function generateTTS(text) {
   if (!apiKey || !voiceId) return null;
 
   const outFile = path.join(TMP_DIR, `tts_${Date.now()}.mp3`);
-
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({
       text,
       model_id: "eleven_multilingual_v2",
       voice_settings: { stability: 0.5, similarity_boost: 0.75 },
     });
-
     const req = https.request({
       hostname: "api.elevenlabs.io",
       path:     `/v1/text-to-speech/${voiceId}`,
       method:   "POST",
       headers:  {
-        "xi-api-key":   apiKey,
-        "Content-Type": "application/json",
-        "Accept":       "audio/mpeg",
+        "xi-api-key":     apiKey,
+        "Content-Type":   "application/json",
+        "Accept":         "audio/mpeg",
         "Content-Length": Buffer.byteLength(body),
       },
     }, res => {
@@ -230,7 +246,7 @@ async function generateTTS(text) {
       const file = fs.createWriteStream(outFile);
       res.pipe(file);
       file.on("finish", () => { file.close(); resolve(outFile); });
-      file.on("error", reject);
+      file.on("error",  reject);
     });
     req.on("error", reject);
     req.write(body);
@@ -238,22 +254,16 @@ async function generateTTS(text) {
   });
 }
 
-// Stream TTS como recurso de audio
 function createTTSResource(mp3File) {
   const ffmpeg = spawn("ffmpeg", [
-    "-i",        mp3File,
-    "-f",        "s16le",
-    "-ar",       "48000",
-    "-ac",       "2",
-    "-loglevel", "error",
-    "pipe:1",
+    "-i", mp3File, "-f", "s16le", "-ar", "48000", "-ac", "2", "-loglevel", "error", "pipe:1",
   ]);
   ffmpeg.stderr.on("data", d => console.error("[ffmpeg tts]", d.toString().trim()));
   return createAudioResource(ffmpeg.stdout, { inputType: StreamType.Raw });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// YOUTUBE STREAM (yt-dlp + ffmpeg)
+// YOUTUBE STREAM
 // ─────────────────────────────────────────────────────────────────────────────
 async function getYouTubeStream(searchQuery) {
   const results = await playdl.search(searchQuery, { source: { youtube: "video" }, limit: 1 });
@@ -262,9 +272,7 @@ async function getYouTubeStream(searchQuery) {
   console.log(`[Musica] YouTube: ${video.url}`);
 
   const ytUrl = await new Promise((resolve, reject) => {
-    const ytdlp = spawn("yt-dlp", [
-      "--no-playlist", "-f", "bestaudio", "--get-url", video.url,
-    ]);
+    const ytdlp = spawn("yt-dlp", ["--no-playlist", "-f", "bestaudio", "--get-url", video.url]);
     let out = "", err = "";
     ytdlp.stdout.on("data", d => out += d.toString());
     ytdlp.stderr.on("data", d => err += d.toString());
@@ -277,12 +285,7 @@ async function getYouTubeStream(searchQuery) {
 
   const ffmpeg = spawn("ffmpeg", [
     "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
-    "-i",        ytUrl,
-    "-f",        "s16le",
-    "-ar",       "48000",
-    "-ac",       "2",
-    "-loglevel", "error",
-    "pipe:1",
+    "-i", ytUrl, "-f", "s16le", "-ar", "48000", "-ac", "2", "-loglevel", "error", "pipe:1",
   ]);
   ffmpeg.stderr.on("data", d => console.error("[ffmpeg]", d.toString().trim()));
   ffmpeg.on("error", e => console.error("[ffmpeg error]", e.message));
@@ -292,6 +295,7 @@ async function getYouTubeStream(searchQuery) {
     title:     video.title,
     url:       video.url,
     duration:  video.durationRaw,
+    durationSec: parseDuration(video.durationRaw),
     thumbnail: video.thumbnails?.[0]?.url || null,
   };
 }
@@ -304,22 +308,77 @@ async function fillAutocola(guildId, queue) {
     const history = await getRecentHistory(guildId, 5);
     const seedIds = history.filter(h => h.spotify_id).map(h => h.spotify_id);
     if (seedIds.length === 0) return false;
-
-    // Usar el track más reciente como seed
     const recs = await getSpotifyRecommendations(seedIds[0], 5);
     if (!recs || recs.length === 0) return false;
-
-    // Evitar duplicar lo que ya está en cola o historial reciente
     const recentTitles = new Set(history.map(h => h.title.toLowerCase()));
     const filtered = recs.filter(r => !recentTitles.has(r.title.toLowerCase()));
-
     if (filtered.length === 0) return false;
     queue.push(...filtered);
-    console.log(`[Musica] Autocola: añadidas ${filtered.length} canciones`);
+    console.log(`[Musica] Autocola: ${filtered.length} canciones añadidas`);
     return true;
   } catch (e) {
     console.error("[Musica] Error autocola:", e.message);
     return false;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PROGRESS BAR — mensaje que se actualiza cada 2s
+// ─────────────────────────────────────────────────────────────────────────────
+function startProgressBar(q, track, ytUrl) {
+  // Limpiar intervalo anterior si existe
+  if (q.progressInterval) {
+    clearInterval(q.progressInterval);
+    q.progressInterval = null;
+  }
+  if (q.progressMsg) {
+    q.progressMsg.delete().catch(() => {});
+    q.progressMsg = null;
+  }
+
+  const totalSec = track.durationSec || 0;
+  const startTime = Date.now();
+
+  const buildEmbed = (elapsedSec) => new EmbedBuilder()
+    .setColor(track.isAutocola ? "#8B5CF6" : "#1DB954")
+    .setTitle("🎵 " + track.title)
+    .setURL(track.spotifyUrl || ytUrl || null)
+    .setThumbnail(track.thumbnail || null)
+    .setDescription(
+      buildProgressBar(elapsedSec, totalSec) + "\n" +
+      `⏱️ \`${fmtTime(elapsedSec)}\` / \`${fmtTime(totalSec)}\``
+    )
+    .addFields(
+      { name: "👤 Solicitado", value: track.isAutocola ? "🤖 Autocola" : (track.requestedBy || "-"), inline: true },
+      { name: "🎬 Fuente",    value: ytUrl ? `[YouTube](${ytUrl})` : "-", inline: true },
+    )
+    .setFooter({ text: "NexaBot Music • actualiza cada 2s" });
+
+  // Enviar mensaje inicial
+  q.textChannel?.send({ embeds: [buildEmbed(0)] })
+    .then(msg => {
+      q.progressMsg = msg;
+      q.progressInterval = setInterval(async () => {
+        const elapsed = Math.floor((Date.now() - startTime) / 1000);
+        try {
+          await msg.edit({ embeds: [buildEmbed(elapsed)] });
+        } catch {
+          clearInterval(q.progressInterval);
+          q.progressInterval = null;
+        }
+      }, 2000);
+    })
+    .catch(() => {});
+}
+
+function stopProgressBar(q) {
+  if (q.progressInterval) {
+    clearInterval(q.progressInterval);
+    q.progressInterval = null;
+  }
+  if (q.progressMsg) {
+    q.progressMsg.delete().catch(() => {});
+    q.progressMsg = null;
   }
 }
 
@@ -330,61 +389,49 @@ const queues = new Map();
 
 async function playNext(guildId, client) {
   const q = queues.get(guildId);
-  if (!q) return;
+  if (!q || q.playingTTS) return;
 
-  // Cola vacía → intentar autocola
   if (q.queue.length === 0) {
     const filled = await fillAutocola(guildId, q.queue);
-
     if (!filled || q.queue.length === 0) {
+      stopProgressBar(q);
       q?.textChannel?.send({ content: "✅ Cola terminada. 👋" }).catch(() => {});
       try { q?.connection?.destroy(); } catch {}
       queues.delete(guildId);
       return;
     }
-
-    // Anunciar autocola con TTS
     await playTTSAndThen(q, getAutocolaPhrase(), guildId, client);
     return;
   }
 
   const track = q.queue[0];
-
-  // Contar usuarios en el canal de voz (sin contar bots)
-  const voiceChannel = q.connection?.joinConfig?.channelId
-    ? client?.channels?.cache.get(q.connection.joinConfig.channelId)
-    : null;
-  const userCount = voiceChannel?.members?.filter(m => !m.user.bot)?.size || 2;
-
-  // Frase de DJ antes de reproducir (solo si no es la primera canción)
   if (q.current && track.artist) {
-    await playTTSAndThen(q, getDJPhrase(track.artist), guildId, client, true);
+    await playTTSAndThen(q, getDJPhrase(track.artist), guildId, client);
     return;
   }
 
   await startTrack(guildId, client);
 }
 
-async function playTTSAndThen(q, text, guildId, client, thenPlay = false) {
+async function playTTSAndThen(q, text, guildId, client) {
   console.log(`[DJ] TTS: "${text}"`);
+  q.playingTTS = true;
+  stopProgressBar(q);
   try {
     const ttsFile = await generateTTS(text);
-    if (!ttsFile) {
-      if (thenPlay) await startTrack(guildId, client);
-      else await startTrack(guildId, client);
-      return;
-    }
+    if (!ttsFile) { q.playingTTS = false; await startTrack(guildId, client); return; }
 
     const resource = createTTSResource(ttsFile);
     q.player.play(resource);
 
-    // Cuando termine el TTS, reproducir la canción
     q.player.once(AudioPlayerStatus.Idle, async () => {
+      q.playingTTS = false;
       try { fs.unlinkSync(ttsFile); } catch {}
       await startTrack(guildId, client);
     });
   } catch (e) {
     console.error("[DJ] Error TTS:", e.message);
+    q.playingTTS = false;
     await startTrack(guildId, client);
   }
 }
@@ -392,7 +439,7 @@ async function playTTSAndThen(q, text, guildId, client, thenPlay = false) {
 async function startTrack(guildId, client) {
   const q = queues.get(guildId);
   if (!q || q.queue.length === 0) {
-    queues.delete(guildId);
+    if (q) { try { q.connection?.destroy(); } catch {} queues.delete(guildId); }
     return;
   }
 
@@ -401,30 +448,17 @@ async function startTrack(guildId, client) {
 
   try {
     const yt = await getYouTubeStream(track.searchQuery);
-    if (!track.thumbnail) track.thumbnail = yt.thumbnail;
+    if (!track.thumbnail)  track.thumbnail  = yt.thumbnail;
     if (!track.duration || track.duration === "?") track.duration = yt.duration;
+    if (!track.durationSec || track.durationSec === 0) track.durationSec = yt.durationSec;
 
     const resource = createAudioResource(yt.stream, { inputType: StreamType.Raw });
     q.player.play(resource);
 
-    // Guardar en historial
     await saveToHistory(guildId, track.requestedById || null, track);
 
-    const autocolaLabel = track.isAutocola ? " `🤖 autocola`" : "";
-    q.textChannel?.send({
-      embeds: [new EmbedBuilder()
-        .setColor(track.isAutocola ? "#8B5CF6" : "#1DB954")
-        .setTitle("🎵 Reproduciendo ahora" + (track.isAutocola ? " — Autocola" : ""))
-        .setDescription(`**[${track.title}](${track.spotifyUrl || yt.url})**${autocolaLabel}`)
-        .setThumbnail(track.thumbnail || null)
-        .addFields(
-          { name: "⏱️ Duración",   value: track.duration || yt.duration || "?", inline: true },
-          { name: "👤 Solicitado", value: track.isAutocola ? "🤖 Autocola" : (track.requestedBy || "-"), inline: true },
-          { name: "🎬 Fuente",     value: `[YouTube](${yt.url})`, inline: true },
-        )
-        .setFooter({ text: "NexaBot Music • Spotify + YouTube" })
-      ]
-    }).catch(() => {});
+    // Iniciar barra de progreso
+    startProgressBar(q, track, yt.url);
 
     console.log(`[Musica] ▶️ ${track.title}${track.isAutocola ? " (autocola)" : ""}`);
 
@@ -458,11 +492,16 @@ async function addToQueue(guildId, voiceChannel, textChannel, track, client) {
     const player = createAudioPlayer();
     connection.subscribe(player);
 
-    player.on(AudioPlayerStatus.Idle, () => playNext(guildId, client));
+    player.on(AudioPlayerStatus.Idle, () => {
+      const q2 = queues.get(guildId);
+      if (q2 && !q2.playingTTS) playNext(guildId, client);
+    });
     player.on(AudioPlayerStatus.Playing,   () => console.log("[Musica] ▶️ Playing"));
     player.on(AudioPlayerStatus.Buffering, () => console.log("[Musica] ⏳ Buffering..."));
     player.on("error", err => {
       console.error("[Musica] Player error:", err.message);
+      const q2 = queues.get(guildId);
+      if (q2) { q2.playingTTS = false; stopProgressBar(q2); }
       queues.get(guildId)?.textChannel?.send({ content: `${EMOJI.CRUZ} Error: ${err.message}` }).catch(() => {});
       setTimeout(() => startTrack(guildId, client), 1000);
     });
@@ -474,12 +513,14 @@ async function addToQueue(guildId, voiceChannel, textChannel, track, client) {
           entersState(connection, VoiceConnectionStatus.Connecting,  5_000),
         ]);
       } catch {
+        const q2 = queues.get(guildId);
+        if (q2) stopProgressBar(q2);
         connection.destroy();
         queues.delete(guildId);
       }
     });
 
-    q = { connection, player, queue: [track], current: null, textChannel };
+    q = { connection, player, queue: [track], current: null, textChannel, playingTTS: false, progressMsg: null, progressInterval: null };
     queues.set(guildId, q);
     await startTrack(guildId, client);
 
@@ -509,15 +550,11 @@ module.exports = {
 
   data: new SlashCommandBuilder()
     .setName("musica")
-    .setDescription("Sistema de música (Spotify + YouTube + Autocola IA)")
+    .setDescription("Sistema de música (Spotify + YouTube + Autocola + DJ)")
     .addSubcommand(s => s
       .setName("play")
       .setDescription("Reproduce una canción")
-      .addStringOption(o => o
-        .setName("busqueda")
-        .setDescription("Nombre del artista y canción")
-        .setRequired(true)
-      )
+      .addStringOption(o => o.setName("busqueda").setDescription("Nombre del artista y canción").setRequired(true))
     )
     .addSubcommand(s => s.setName("pause").setDescription("Pausa la reproducción"))
     .addSubcommand(s => s.setName("resume").setDescription("Reanuda la reproducción"))
@@ -528,13 +565,7 @@ module.exports = {
     .addSubcommand(s => s
       .setName("volumen")
       .setDescription("Cambia el volumen (1-100)")
-      .addIntegerOption(o => o
-        .setName("nivel")
-        .setDescription("Nivel de volumen")
-        .setRequired(true)
-        .setMinValue(1)
-        .setMaxValue(100)
-      )
+      .addIntegerOption(o => o.setName("nivel").setDescription("Nivel de volumen").setRequired(true).setMinValue(1).setMaxValue(100))
     ),
 
   async execute(interaction) {
@@ -543,8 +574,7 @@ module.exports = {
 
     if (sub === "play") {
       const vc = interaction.member?.voice?.channel;
-      if (!vc)
-        return interaction.reply({ content: `${EMOJI.CRUZ} Debes estar en un canal de voz.`, flags: 64 });
+      if (!vc) return interaction.reply({ content: `${EMOJI.CRUZ} Debes estar en un canal de voz.`, flags: 64 });
 
       await interaction.deferReply();
       const busqueda = interaction.options.getString("busqueda");
@@ -556,24 +586,14 @@ module.exports = {
           console.log(`[Musica] Spotify: ${trackInfo.title}`);
         } catch (e) {
           console.warn("[Musica] Spotify falló:", e.message);
-          trackInfo = {
-            searchQuery: busqueda,
-            title:       busqueda,
-            artist:      busqueda.split("-")[0]?.trim() || busqueda,
-            spotifyUrl:  null,
-            spotifyId:   null,
-            thumbnail:   null,
-            duration:    "?",
-          };
+          trackInfo = { searchQuery: busqueda, title: busqueda, artist: busqueda.split("-")[0]?.trim() || busqueda, spotifyUrl: null, spotifyId: null, thumbnail: null, duration: "?", durationSec: 0 };
         }
 
         trackInfo.requestedBy   = interaction.user.toString();
         trackInfo.requestedById = interaction.user.id;
 
         await addToQueue(interaction.guildId, vc, interaction.channel, trackInfo, client);
-        await interaction.editReply({
-          content: `${EMOJI.CHECK} Buscando **${trackInfo.title}** en YouTube...`
-        });
+        await interaction.editReply({ content: `${EMOJI.CHECK} Buscando **${trackInfo.title}** en YouTube...` });
 
       } catch (e) {
         console.error("[Musica] Error play:", e.message);
@@ -584,32 +604,28 @@ module.exports = {
 
     if (sub === "historial") {
       const history = await getRecentHistory(interaction.guildId, 10);
-      if (history.length === 0)
-        return interaction.reply({ content: "📭 No hay historial de canciones aún.", flags: 64 });
-
-      const lista = history
-        .map((h, i) => `${i + 1}. **${h.title}** — <t:${Math.floor(new Date(h.played_at).getTime() / 1000)}:R>`)
-        .join("\n");
-
+      if (history.length === 0) return interaction.reply({ content: "📭 No hay historial aún.", flags: 64 });
+      const lista = history.map((h, i) =>
+        `${i + 1}. **${h.title}** — <t:${Math.floor(new Date(h.played_at).getTime() / 1000)}:R>`
+      ).join("\n");
       return interaction.reply({
-        embeds: [new EmbedBuilder()
-          .setColor("#1DB954")
-          .setTitle("📜 Historial de canciones")
-          .setDescription(lista)
-          .setFooter({ text: "NexaBot Music • Últimas 10 canciones" })
-        ]
+        embeds: [new EmbedBuilder().setColor("#1DB954").setTitle("📜 Historial de canciones").setDescription(lista).setFooter({ text: "NexaBot Music • Últimas 10 canciones" })]
       });
     }
 
     const q = queues.get(interaction.guildId);
-    if (!q)
-      return interaction.reply({ content: `${EMOJI.CRUZ} No hay música reproduciéndose.`, flags: 64 });
+    if (!q) return interaction.reply({ content: `${EMOJI.CRUZ} No hay música reproduciéndose.`, flags: 64 });
 
     if (sub === "pause")  { q.player.pause();   return interaction.reply({ content: "⏸️ Música pausada." }); }
     if (sub === "resume") { q.player.unpause(); return interaction.reply({ content: "▶️ Música reanudada." }); }
-    if (sub === "skip")   { q.player.stop();    return interaction.reply({ content: "⏭️ Canción saltada." }); }
+    if (sub === "skip")   {
+      stopProgressBar(q);
+      q.player.stop();
+      return interaction.reply({ content: "⏭️ Canción saltada." });
+    }
 
     if (sub === "stop") {
+      stopProgressBar(q);
       q.queue = [];
       q.player.stop();
       try { q.connection.destroy(); } catch {}
@@ -620,23 +636,17 @@ module.exports = {
     if (sub === "cola") {
       const autocolaCount = q.queue.filter(t => t.isAutocola).length;
       const lista = [
-        q.current
-          ? `▶️ **${q.current.title}** - ${q.current.duration || "?"} *(reproduciendo)*`
-          : "(nada reproduciendo)",
-        ...q.queue.slice(0, 9).map((t, i) =>
-          `${i + 1}. **${t.title}** - ${t.duration || "?"}${t.isAutocola ? " 🤖" : ""}`)
+        q.current ? `▶️ **${q.current.title}** - ${q.current.duration || "?"} *(reproduciendo)*` : "(nada)",
+        ...q.queue.slice(0, 9).map((t, i) => `${i + 1}. **${t.title}** - ${t.duration || "?"}${t.isAutocola ? " 🤖" : ""}`)
       ].join("\n");
-
       return interaction.reply({
         embeds: [new EmbedBuilder()
-          .setColor("#1DB954")
-          .setTitle("🎵 Cola de reproducción")
-          .setDescription(lista || "La cola está vacía.")
+          .setColor("#1DB954").setTitle("🎵 Cola de reproducción").setDescription(lista || "Vacía.")
           .addFields(
             { name: "📋 Total",    value: `${q.queue.length + (q.current ? 1 : 0)}`, inline: true },
             { name: "🤖 Autocola", value: `${autocolaCount}`, inline: true },
           )
-          .setFooter({ text: "NexaBot Music • 🤖 = sugerencia automática" })
+          .setFooter({ text: "🤖 = sugerencia automática" })
         ]
       });
     }
@@ -644,7 +654,7 @@ module.exports = {
     if (sub === "volumen") {
       const nivel = interaction.options.getInteger("nivel");
       q.volume = nivel;
-      return interaction.reply({ content: `🔊 Volumen: **${nivel}%** (se aplica en la siguiente canción)` });
+      return interaction.reply({ content: `🔊 Volumen: **${nivel}%** (próxima canción)` });
     }
   },
 };
