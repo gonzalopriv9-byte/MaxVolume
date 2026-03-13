@@ -1,6 +1,6 @@
 // commands/musica.js
-// Búsqueda via Spotify API → reproducción via YouTube (play-dl)
-// Canciones completas, sin límite de 30s
+// Búsqueda via Spotify API → reproducción via YouTube (ytdl-core)
+// play-dl solo se usa para buscar, ytdl-core para el stream
 
 const { SlashCommandBuilder, EmbedBuilder } = require("discord.js");
 const {
@@ -10,8 +10,10 @@ const {
   AudioPlayerStatus,
   VoiceConnectionStatus,
   entersState,
+  StreamType,
 } = require("@discordjs/voice");
 const playdl = require("play-dl");
+const ytdl   = require("ytdl-core");
 const https  = require("https");
 
 const EMOJI = {
@@ -21,17 +23,15 @@ const EMOJI = {
   LOADING:  "<a:Loading:1481763726972555324>",
 };
 
-// ── Spotify: obtener token de acceso (Client Credentials) ───────────────────
-let spotifyToken     = null;
-let spotifyTokenExp  = 0;
+// ── Spotify: obtener token ───────────────────────────────────────────────────
+let spotifyToken    = null;
+let spotifyTokenExp = 0;
 
 async function getSpotifyToken() {
   if (spotifyToken && Date.now() < spotifyTokenExp) return spotifyToken;
-
-  const creds  = Buffer.from(
+  const creds = Buffer.from(
     `${process.env.SPOTIFY_CLIENT_ID}:${process.env.SPOTIFY_CLIENT_SECRET}`
   ).toString("base64");
-
   return new Promise((resolve, reject) => {
     const body = "grant_type=client_credentials";
     const req  = https.request({
@@ -39,8 +39,8 @@ async function getSpotifyToken() {
       path:     "/api/token",
       method:   "POST",
       headers:  {
-        "Authorization": `Basic ${creds}`,
-        "Content-Type":  "application/x-www-form-urlencoded",
+        "Authorization":  `Basic ${creds}`,
+        "Content-Type":   "application/x-www-form-urlencoded",
         "Content-Length": Buffer.byteLength(body),
       },
     }, res => {
@@ -48,7 +48,7 @@ async function getSpotifyToken() {
       res.on("data", c => data += c);
       res.on("end", () => {
         try {
-          const json = JSON.parse(data);
+          const json      = JSON.parse(data);
           spotifyToken    = json.access_token;
           spotifyTokenExp = Date.now() + (json.expires_in - 60) * 1000;
           resolve(spotifyToken);
@@ -65,19 +65,17 @@ async function getSpotifyToken() {
 async function searchSpotify(query) {
   const token = await getSpotifyToken();
   return new Promise((resolve, reject) => {
-    const path = `/v1/search?q=${encodeURIComponent(query)}&type=track&limit=1`;
     https.get({
       hostname: "api.spotify.com",
-      path,
-      headers: { Authorization: `Bearer ${token}` },
+      path:     `/v1/search?q=${encodeURIComponent(query)}&type=track&limit=1`,
+      headers:  { Authorization: `Bearer ${token}` },
     }, res => {
       let data = "";
       res.on("data", c => data += c);
       res.on("end", () => {
         try {
-          const json  = JSON.parse(data);
-          const track = json?.tracks?.items?.[0];
-          if (!track) return reject(new Error("No se encontró la canción en Spotify."));
+          const track = JSON.parse(data)?.tracks?.items?.[0];
+          if (!track) return reject(new Error("No encontrado en Spotify."));
           resolve({
             searchQuery: `${track.artists[0].name} - ${track.name}`,
             title:       `${track.artists[0].name} - ${track.name}`,
@@ -85,7 +83,7 @@ async function searchSpotify(query) {
             thumbnail:   track.album.images?.[0]?.url || null,
             duration:    msToTime(track.duration_ms),
           });
-        } catch (e) { reject(new Error("Error parseando Spotify: " + e.message)); }
+        } catch (e) { reject(new Error("Error Spotify: " + e.message)); }
       });
     }).on("error", reject);
   });
@@ -96,13 +94,19 @@ function msToTime(ms) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
-// ── YouTube: buscar y obtener stream via play-dl ─────────────────────────────
+// ── YouTube: buscar con play-dl, stream con ytdl-core ───────────────────────
 async function getYouTubeStream(searchQuery) {
   const results = await playdl.search(searchQuery, { source: { youtube: "video" }, limit: 1 });
   if (!results || results.length === 0) throw new Error("No se encontró en YouTube.");
 
   const video  = results[0];
-  const stream = await playdl.stream(video.url, { quality: 2 });
+  console.log(`[Musica] YouTube URL: ${video.url}`);
+
+  const stream = ytdl(video.url, {
+    filter:         "audioonly",
+    quality:        "highestaudio",
+    highWaterMark:  1 << 25,
+  });
 
   return {
     stream,
@@ -132,8 +136,8 @@ async function playNext(guildId) {
     console.log(`[Musica] Buscando en YouTube: ${track.searchQuery}`);
     const yt = await getYouTubeStream(track.searchQuery);
 
-    const resource = createAudioResource(yt.stream.stream, {
-      inputType: yt.stream.type,
+    const resource = createAudioResource(yt.stream, {
+      inputType: StreamType.Arbitrary,
     });
 
     q.player.play(resource);
@@ -156,7 +160,7 @@ async function playNext(guildId) {
       ]
     }).catch(() => {});
 
-    console.log(`[Musica] ▶️ Reproduciendo: ${track.title} (${track.duration})`);
+    console.log(`[Musica] ▶️ Reproduciendo: ${track.title}`);
 
   } catch (e) {
     console.error(`[Musica] Error stream: ${e.message}`);
@@ -173,7 +177,7 @@ async function addToQueue(guildId, voiceChannel, textChannel, track) {
       channelId:      voiceChannel.id,
       guildId,
       adapterCreator: voiceChannel.guild.voiceAdapterCreator,
-      selfDeaf:       true,
+      selfDeaf:       false,  // NO ensordecerse
       selfMute:       false,
     });
 
@@ -279,9 +283,9 @@ module.exports = {
         let trackInfo;
         try {
           trackInfo = await searchSpotify(busqueda);
-          console.log(`[Musica] Spotify encontró: ${trackInfo.title}`);
+          console.log(`[Musica] Spotify: ${trackInfo.title}`);
         } catch (e) {
-          console.warn("[Musica] Spotify falló, búsqueda directa en YouTube:", e.message);
+          console.warn("[Musica] Spotify falló, búsqueda directa:", e.message);
           trackInfo = {
             searchQuery: busqueda,
             title:       busqueda,
