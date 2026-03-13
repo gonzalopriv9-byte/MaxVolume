@@ -1,6 +1,6 @@
 // commands/musica.js
-// Fuente: Deezer API (gratuita, sin autenticacion, MP3 directo 30s)
-// Fix: URL de preview se obtiene justo antes de hacer stream para evitar expiración del token
+// Búsqueda via Spotify API → reproducción via YouTube (play-dl)
+// Canciones completas, sin límite de 30s
 
 const { SlashCommandBuilder, EmbedBuilder } = require("discord.js");
 const {
@@ -10,10 +10,9 @@ const {
   AudioPlayerStatus,
   VoiceConnectionStatus,
   entersState,
-  StreamType,
 } = require("@discordjs/voice");
-const { spawn } = require("child_process");
-const https = require("https");
+const playdl = require("play-dl");
+const https  = require("https");
 
 const EMOJI = {
   CHECK:    "<a:Tick:1480638398816456848>",
@@ -22,75 +21,96 @@ const EMOJI = {
   LOADING:  "<a:Loading:1481763726972555324>",
 };
 
-// ── Busca en Deezer, guarda el ID del track (no la URL que expira) ──────────
-function searchDeezer(query) {
-  return new Promise((resolve, reject) => {
-    const url = `https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=1`;
-    https.get(url, { headers: { "User-Agent": "Mozilla/5.0" } }, res => {
-      let data = "";
-      res.on("data", chunk => data += chunk);
-      res.on("end", () => {
-        try {
-          const json  = JSON.parse(data);
-          const track = json?.data?.[0];
-          if (!track || !track.preview)
-            return reject(new Error("No se encontró ningún resultado en Deezer."));
-          resolve({
-            title:     `${track.artist.name} - ${track.title}`,
-            url:       track.link,
-            trackId:   track.id,          // guardamos el ID, no la URL con token
-            preview:   track.preview,     // URL fresca al buscar
-            duration:  "0:30",
-            thumbnail: track.album?.cover_medium || null,
-          });
-        } catch (e) {
-          reject(new Error("Error parseando respuesta de Deezer."));
-        }
-      });
-    }).on("error", reject);
-  });
-}
+// ── Spotify: obtener token de acceso (Client Credentials) ───────────────────
+let spotifyToken     = null;
+let spotifyTokenExp  = 0;
 
-// ── Obtiene una URL de preview fresca justo antes de reproducir ──────────────
-function getFreshPreviewUrl(trackId) {
+async function getSpotifyToken() {
+  if (spotifyToken && Date.now() < spotifyTokenExp) return spotifyToken;
+
+  const creds  = Buffer.from(
+    `${process.env.SPOTIFY_CLIENT_ID}:${process.env.SPOTIFY_CLIENT_SECRET}`
+  ).toString("base64");
+
   return new Promise((resolve, reject) => {
-    const url = `https://api.deezer.com/track/${trackId}`;
-    https.get(url, { headers: { "User-Agent": "Mozilla/5.0" } }, res => {
+    const body = "grant_type=client_credentials";
+    const req  = https.request({
+      hostname: "accounts.spotify.com",
+      path:     "/api/token",
+      method:   "POST",
+      headers:  {
+        "Authorization": `Basic ${creds}`,
+        "Content-Type":  "application/x-www-form-urlencoded",
+        "Content-Length": Buffer.byteLength(body),
+      },
+    }, res => {
       let data = "";
-      res.on("data", chunk => data += chunk);
+      res.on("data", c => data += c);
       res.on("end", () => {
         try {
           const json = JSON.parse(data);
-          if (!json?.preview) return reject(new Error("Sin preview disponible"));
-          resolve(json.preview);
-        } catch (e) {
-          reject(new Error("Error obteniendo preview fresco"));
-        }
+          spotifyToken    = json.access_token;
+          spotifyTokenExp = Date.now() + (json.expires_in - 60) * 1000;
+          resolve(spotifyToken);
+        } catch (e) { reject(e); }
+      });
+    });
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+// ── Spotify: buscar canción ──────────────────────────────────────────────────
+async function searchSpotify(query) {
+  const token = await getSpotifyToken();
+  return new Promise((resolve, reject) => {
+    const path = `/v1/search?q=${encodeURIComponent(query)}&type=track&limit=1`;
+    https.get({
+      hostname: "api.spotify.com",
+      path,
+      headers: { Authorization: `Bearer ${token}` },
+    }, res => {
+      let data = "";
+      res.on("data", c => data += c);
+      res.on("end", () => {
+        try {
+          const json  = JSON.parse(data);
+          const track = json?.tracks?.items?.[0];
+          if (!track) return reject(new Error("No se encontró la canción en Spotify."));
+          resolve({
+            searchQuery: `${track.artists[0].name} - ${track.name}`,
+            title:       `${track.artists[0].name} - ${track.name}`,
+            spotifyUrl:  track.external_urls.spotify,
+            thumbnail:   track.album.images?.[0]?.url || null,
+            duration:    msToTime(track.duration_ms),
+          });
+        } catch (e) { reject(new Error("Error parseando Spotify: " + e.message)); }
       });
     }).on("error", reject);
   });
 }
 
-// ── Stream ffmpeg con la URL fresca ─────────────────────────────────────────
-function createFfmpegStream(mp3Url, volume = 80) {
-  const ffmpeg = spawn("ffmpeg", [
-    "-reconnect",       "1",
-    "-reconnect_streamed", "1",
-    "-reconnect_delay_max", "5",
-    "-user_agent",      "Mozilla/5.0",
-    "-i",               mp3Url,
-    "-f",               "s16le",
-    "-ar",              "48000",
-    "-ac",              "2",
-    "-af",              `volume=${volume / 100}`,
-    "-loglevel",        "error",
-    "pipe:1",
-  ]);
+function msToTime(ms) {
+  const s = Math.floor(ms / 1000);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
 
-  ffmpeg.stderr.on("data", d => console.error("[ffmpeg]", d.toString().trim()));
-  ffmpeg.on("error", e => console.error("[ffmpeg error]", e.message));
+// ── YouTube: buscar y obtener stream via play-dl ─────────────────────────────
+async function getYouTubeStream(searchQuery) {
+  const results = await playdl.search(searchQuery, { source: { youtube: "video" }, limit: 1 });
+  if (!results || results.length === 0) throw new Error("No se encontró en YouTube.");
 
-  return ffmpeg.stdout;
+  const video  = results[0];
+  const stream = await playdl.stream(video.url, { quality: 2 });
+
+  return {
+    stream,
+    title:     video.title,
+    url:       video.url,
+    duration:  video.durationRaw,
+    thumbnail: video.thumbnails?.[0]?.url || null,
+  };
 }
 
 // ── Cola de reproducción ─────────────────────────────────────────────────────
@@ -100,7 +120,7 @@ async function playNext(guildId) {
   const q = queues.get(guildId);
   if (!q || q.queue.length === 0) {
     q?.textChannel?.send({ content: "✅ Cola terminada. 👋" }).catch(() => {});
-    q?.connection?.destroy();
+    try { q?.connection?.destroy(); } catch {}
     queues.delete(guildId);
     return;
   }
@@ -109,36 +129,38 @@ async function playNext(guildId) {
   q.current   = track;
 
   try {
-    // Obtener URL fresca justo ahora (el token de Deezer expira rápido)
-    console.log(`[Musica] Obteniendo URL fresca para: ${track.title}`);
-    const freshUrl = await getFreshPreviewUrl(track.trackId).catch(() => track.preview);
+    console.log(`[Musica] Buscando en YouTube: ${track.searchQuery}`);
+    const yt = await getYouTubeStream(track.searchQuery);
 
-    console.log(`[Musica] Iniciando stream: ${freshUrl.slice(0, 60)}...`);
-    const audioStream = createFfmpegStream(freshUrl, q.volume || 80);
-
-    const resource = createAudioResource(audioStream, {
-      inputType: StreamType.Raw,
+    const resource = createAudioResource(yt.stream.stream, {
+      inputType: yt.stream.type,
     });
 
     q.player.play(resource);
 
+    if (!track.thumbnail) track.thumbnail = yt.thumbnail;
+    if (!track.duration || track.duration === "?") track.duration = yt.duration;
+
     q.textChannel?.send({
       embeds: [new EmbedBuilder()
-        .setColor("#A238FF")
+        .setColor("#1DB954")
         .setTitle("🎵 Reproduciendo ahora")
-        .setDescription(`**[${track.title}](${track.url})**`)
+        .setDescription(`**[${track.title}](${track.spotifyUrl || yt.url})**`)
         .setThumbnail(track.thumbnail || null)
         .addFields(
-          { name: "Duración",   value: "0:30 (preview)", inline: true },
-          { name: "Solicitado", value: track.requestedBy || "-",       inline: true },
+          { name: "⏱️ Duración",   value: track.duration || yt.duration || "?", inline: true },
+          { name: "👤 Solicitado", value: track.requestedBy || "-",              inline: true },
+          { name: "🎬 Fuente",     value: `[YouTube](${yt.url})`,                inline: true },
         )
-        .setFooter({ text: "NexaBot Music • Deezer" })
+        .setFooter({ text: "NexaBot Music • Spotify + YouTube" })
       ]
     }).catch(() => {});
 
+    console.log(`[Musica] ▶️ Reproduciendo: ${track.title} (${track.duration})`);
+
   } catch (e) {
     console.error(`[Musica] Error stream: ${e.message}`);
-    q?.textChannel?.send({ content: `${EMOJI.CRUZ} Error reproduciendo: ${e.message}` }).catch(() => {});
+    q?.textChannel?.send({ content: `${EMOJI.CRUZ} Error reproduciendo **${track.title}**: ${e.message}` }).catch(() => {});
     setTimeout(() => playNext(guildId), 1000);
   }
 }
@@ -151,36 +173,29 @@ async function addToQueue(guildId, voiceChannel, textChannel, track) {
       channelId:      voiceChannel.id,
       guildId,
       adapterCreator: voiceChannel.guild.voiceAdapterCreator,
-      selfDeaf:       false,
+      selfDeaf:       true,
       selfMute:       false,
     });
 
-    // Esperar a que la conexión esté lista antes de reproducir
     try {
-      await entersState(connection, VoiceConnectionStatus.Ready, 10_000);
-      console.log("[Musica] Conexión de voz lista");
+      await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
+      console.log("[Musica] Conexión de voz lista ✅");
     } catch (e) {
-      console.error("[Musica] No se pudo conectar al canal de voz:", e.message);
       connection.destroy();
-      throw new Error("No se pudo conectar al canal de voz.");
+      throw new Error("No se pudo conectar al canal de voz: " + e.message);
     }
 
     const player = createAudioPlayer();
     connection.subscribe(player);
 
-    player.on(AudioPlayerStatus.Idle, () => {
-      console.log("[Musica] Player idle, reproduciendo siguiente...");
-      playNext(guildId);
-    });
-
+    player.on(AudioPlayerStatus.Idle,      () => playNext(guildId));
+    player.on(AudioPlayerStatus.Playing,   () => console.log("[Musica] ▶️ Playing"));
+    player.on(AudioPlayerStatus.Buffering, () => console.log("[Musica] ⏳ Buffering..."));
     player.on("error", err => {
       console.error("[Musica] Player error:", err.message);
       queues.get(guildId)?.textChannel?.send({ content: `${EMOJI.CRUZ} Error de audio: ${err.message}` }).catch(() => {});
       setTimeout(() => playNext(guildId), 1000);
     });
-
-    player.on(AudioPlayerStatus.Playing, () => console.log("[Musica] Estado: Playing ✅"));
-    player.on(AudioPlayerStatus.Buffering, () => console.log("[Musica] Estado: Buffering..."));
 
     connection.on(VoiceConnectionStatus.Disconnected, async () => {
       try {
@@ -194,7 +209,7 @@ async function addToQueue(guildId, voiceChannel, textChannel, track) {
       }
     });
 
-    q = { connection, player, queue: [track], current: null, textChannel, volume: 80 };
+    q = { connection, player, queue: [track], current: null, textChannel, volume: 100 };
     queues.set(guildId, q);
     playNext(guildId);
 
@@ -203,10 +218,14 @@ async function addToQueue(guildId, voiceChannel, textChannel, track) {
     q.textChannel = textChannel;
     textChannel.send({
       embeds: [new EmbedBuilder()
-        .setColor("#A238FF")
+        .setColor("#1DB954")
         .setTitle("➕ Añadido a la cola")
         .setDescription(`**${track.title}**`)
-        .setFooter({ text: `Posición en cola: ${q.queue.length}` })
+        .addFields(
+          { name: "⏱️ Duración", value: track.duration || "?", inline: true },
+          { name: "📋 Posición", value: `#${q.queue.length}`,  inline: true },
+        )
+        .setFooter({ text: "NexaBot Music" })
       ]
     }).catch(() => {});
   }
@@ -218,20 +237,20 @@ module.exports = {
 
   data: new SlashCommandBuilder()
     .setName("musica")
-    .setDescription("Sistema de musica (previews 30s via Deezer)")
+    .setDescription("Sistema de música (Spotify + YouTube)")
     .addSubcommand(s => s
       .setName("play")
-      .setDescription("Reproduce una cancion")
+      .setDescription("Reproduce una canción")
       .addStringOption(o => o
         .setName("busqueda")
-        .setDescription("Nombre del artista y cancion")
+        .setDescription("Nombre del artista y canción")
         .setRequired(true)
       )
     )
-    .addSubcommand(s => s.setName("pause").setDescription("Pausa la reproduccion"))
-    .addSubcommand(s => s.setName("resume").setDescription("Reanuda la reproduccion"))
-    .addSubcommand(s => s.setName("skip").setDescription("Salta a la siguiente cancion"))
-    .addSubcommand(s => s.setName("stop").setDescription("Para la musica y vacia la cola"))
+    .addSubcommand(s => s.setName("pause").setDescription("Pausa la reproducción"))
+    .addSubcommand(s => s.setName("resume").setDescription("Reanuda la reproducción"))
+    .addSubcommand(s => s.setName("skip").setDescription("Salta a la siguiente canción"))
+    .addSubcommand(s => s.setName("stop").setDescription("Para la música y vacía la cola"))
     .addSubcommand(s => s.setName("cola").setDescription("Muestra la cola actual"))
     .addSubcommand(s => s
       .setName("volumen")
@@ -248,7 +267,6 @@ module.exports = {
   async execute(interaction) {
     const sub = interaction.options.getSubcommand();
 
-    // ── PLAY ──
     if (sub === "play") {
       const vc = interaction.member?.voice?.channel;
       if (!vc)
@@ -258,13 +276,25 @@ module.exports = {
       const busqueda = interaction.options.getString("busqueda");
 
       try {
-        const trackInfo = await searchDeezer(busqueda);
-        trackInfo.requestedBy = interaction.user.toString();
+        let trackInfo;
+        try {
+          trackInfo = await searchSpotify(busqueda);
+          console.log(`[Musica] Spotify encontró: ${trackInfo.title}`);
+        } catch (e) {
+          console.warn("[Musica] Spotify falló, búsqueda directa en YouTube:", e.message);
+          trackInfo = {
+            searchQuery: busqueda,
+            title:       busqueda,
+            spotifyUrl:  null,
+            thumbnail:   null,
+            duration:    "?",
+          };
+        }
 
-        console.log(`[Musica] Encontrado: ${trackInfo.title} | ID: ${trackInfo.trackId}`);
+        trackInfo.requestedBy = interaction.user.toString();
         await addToQueue(interaction.guildId, vc, interaction.channel, trackInfo);
         await interaction.editReply({
-          content: `${EMOJI.CHECK} Añadiendo **${trackInfo.title}** a la cola...`
+          content: `${EMOJI.CHECK} Buscando **${trackInfo.title}** en YouTube...`
         });
 
       } catch (e) {
@@ -274,45 +304,40 @@ module.exports = {
       return;
     }
 
-    // ── Resto de subcomandos ──
     const q = queues.get(interaction.guildId);
     if (!q)
       return interaction.reply({ content: `${EMOJI.CRUZ} No hay música reproduciéndose.`, flags: 64 });
 
-    if (sub === "pause") {
-      q.player.pause();
-      return interaction.reply({ content: "⏸️ Música pausada." });
-    }
-    if (sub === "resume") {
-      q.player.unpause();
-      return interaction.reply({ content: "▶️ Música reanudada." });
-    }
-    if (sub === "skip") {
-      q.player.stop();
-      return interaction.reply({ content: "⏭️ Canción saltada." });
-    }
+    if (sub === "pause")  { q.player.pause();   return interaction.reply({ content: "⏸️ Música pausada." }); }
+    if (sub === "resume") { q.player.unpause(); return interaction.reply({ content: "▶️ Música reanudada." }); }
+    if (sub === "skip")   { q.player.stop();    return interaction.reply({ content: "⏭️ Canción saltada." }); }
+
     if (sub === "stop") {
       q.queue = [];
       q.player.stop();
-      q.connection.destroy();
+      try { q.connection.destroy(); } catch {}
       queues.delete(interaction.guildId);
       return interaction.reply({ content: "⏹️ Música detenida y cola vaciada." });
     }
+
     if (sub === "cola") {
       const lista = [
-        q.current ? `▶️ **${q.current.title}** - 0:30 *(reproduciendo)*` : "(nada reproduciendo)",
-        ...q.queue.slice(0, 9).map((t, i) => `${i + 1}. **${t.title}** - 0:30`)
-      ].join("\n") || "La cola está vacía.";
+        q.current
+          ? `▶️ **${q.current.title}** - ${q.current.duration || "?"} *(reproduciendo)*`
+          : "(nada reproduciendo)",
+        ...q.queue.slice(0, 9).map((t, i) => `${i + 1}. **${t.title}** - ${t.duration || "?"}`)
+      ].join("\n");
 
       return interaction.reply({
         embeds: [new EmbedBuilder()
-          .setColor("#A238FF")
+          .setColor("#1DB954")
           .setTitle("🎵 Cola de reproducción")
-          .setDescription(lista)
+          .setDescription(lista || "La cola está vacía.")
           .setFooter({ text: `${q.queue.length + (q.current ? 1 : 0)} canciones en total` })
         ]
       });
     }
+
     if (sub === "volumen") {
       const nivel = interaction.options.getInteger("nivel");
       q.volume = nivel;
