@@ -1,6 +1,5 @@
 // commands/musica.js
-// Búsqueda via Spotify API → stream via yt-dlp + ffmpeg
-// yt-dlp siempre actualizado, sin problemas de extracción
+// Spotify + YouTube (yt-dlp) + ElevenLabs DJ + Autocola IA
 
 const { SlashCommandBuilder, EmbedBuilder } = require("discord.js");
 const {
@@ -12,9 +11,15 @@ const {
   entersState,
   StreamType,
 } = require("@discordjs/voice");
-const playdl = require("play-dl");
+const playdl  = require("play-dl");
 const { spawn } = require("child_process");
-const https  = require("https");
+const https   = require("https");
+const http    = require("http");
+const fs      = require("fs");
+const path    = require("path");
+const { createClient } = require("@supabase/supabase-js");
+
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 const EMOJI = {
   CHECK:    "<a:Tick:1480638398816456848>",
@@ -23,7 +28,12 @@ const EMOJI = {
   LOADING:  "<a:Loading:1481763726972555324>",
 };
 
-// ── Spotify: obtener token ───────────────────────────────────────────────────
+const TMP_DIR = "/tmp/nexabot_tts";
+if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SPOTIFY
+// ─────────────────────────────────────────────────────────────────────────────
 let spotifyToken    = null;
 let spotifyTokenExp = 0;
 
@@ -61,7 +71,6 @@ async function getSpotifyToken() {
   });
 }
 
-// ── Spotify: buscar canción ──────────────────────────────────────────────────
 async function searchSpotify(query) {
   const token = await getSpotifyToken();
   return new Promise((resolve, reject) => {
@@ -79,11 +88,43 @@ async function searchSpotify(query) {
           resolve({
             searchQuery: `${track.artists[0].name} - ${track.name}`,
             title:       `${track.artists[0].name} - ${track.name}`,
+            artist:      track.artists[0].name,
             spotifyUrl:  track.external_urls.spotify,
+            spotifyId:   track.id,
             thumbnail:   track.album.images?.[0]?.url || null,
             duration:    msToTime(track.duration_ms),
           });
         } catch (e) { reject(new Error("Error Spotify: " + e.message)); }
+      });
+    }).on("error", reject);
+  });
+}
+
+// Recomendaciones de Spotify basadas en un track ID
+async function getSpotifyRecommendations(seedTrackId, limit = 5) {
+  const token = await getSpotifyToken();
+  return new Promise((resolve, reject) => {
+    https.get({
+      hostname: "api.spotify.com",
+      path:     `/v1/recommendations?seed_tracks=${seedTrackId}&limit=${limit}`,
+      headers:  { Authorization: `Bearer ${token}` },
+    }, res => {
+      let data = "";
+      res.on("data", c => data += c);
+      res.on("end", () => {
+        try {
+          const tracks = JSON.parse(data)?.tracks || [];
+          resolve(tracks.map(t => ({
+            searchQuery: `${t.artists[0].name} - ${t.name}`,
+            title:       `${t.artists[0].name} - ${t.name}`,
+            artist:      t.artists[0].name,
+            spotifyUrl:  t.external_urls.spotify,
+            spotifyId:   t.id,
+            thumbnail:   t.album.images?.[0]?.url || null,
+            duration:    msToTime(t.duration_ms),
+            isAutocola:  true,
+          })));
+        } catch (e) { reject(new Error("Error recomendaciones: " + e.message)); }
       });
     }).on("error", reject);
   });
@@ -94,45 +135,155 @@ function msToTime(ms) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
-// ── YouTube: buscar con play-dl, stream con yt-dlp + ffmpeg ─────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// HISTORIAL SUPABASE
+// ─────────────────────────────────────────────────────────────────────────────
+async function saveToHistory(guildId, userId, track) {
+  try {
+    await supabase.from("music_history").insert({
+      guild_id:    guildId,
+      user_id:     userId || null,
+      title:       track.title,
+      artist:      track.artist || null,
+      spotify_url: track.spotifyUrl || null,
+      spotify_id:  track.spotifyId || null,
+      played_at:   new Date().toISOString(),
+    });
+  } catch (e) {
+    console.error("[Musica] Error guardando historial:", e.message);
+  }
+}
+
+async function getRecentHistory(guildId, limit = 10) {
+  try {
+    const { data } = await supabase
+      .from("music_history")
+      .select("*")
+      .eq("guild_id", guildId)
+      .order("played_at", { ascending: false })
+      .limit(limit);
+    return data || [];
+  } catch (e) {
+    console.error("[Musica] Error leyendo historial:", e.message);
+    return [];
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ELEVENLABS TTS
+// ─────────────────────────────────────────────────────────────────────────────
+const DJ_PHRASES = [
+  "Y como estamos de fiesta, ahora os dejo con un poco de {artist}",
+  "Siguiente en la lista, {artist}! Que lo disfrutéis!",
+  "Arriba el volumen, porque viene {artist}!",
+  "Os traigo lo mejor de {artist}, a disfrutar!",
+  "Y sin parar la música, aquí viene {artist}!",
+  "Para los amantes del buen gusto, {artist}!",
+];
+
+const AUTOCOLA_PHRASES = [
+  "Ya que no hay más peticiones, os sugiero algunas cosas basadas en vuestras últimas peticiones",
+  "La cola se ha vaciado, pero yo sigo aquí! Os pongo algo basado en lo que habéis estado escuchando",
+  "Sin peticiones nuevas, me encargo yo! Os traigo recomendaciones personalizadas",
+];
+
+function getDJPhrase(artist) {
+  const phrase = DJ_PHRASES[Math.floor(Math.random() * DJ_PHRASES.length)];
+  return phrase.replace("{artist}", artist);
+}
+
+function getAutocolaPhrase() {
+  return AUTOCOLA_PHRASES[Math.floor(Math.random() * AUTOCOLA_PHRASES.length)];
+}
+
+async function generateTTS(text) {
+  const apiKey  = process.env.ELEVENLABS_API_KEY;
+  const voiceId = process.env.ELEVENLABS_VOICE_ID;
+  if (!apiKey || !voiceId) return null;
+
+  const outFile = path.join(TMP_DIR, `tts_${Date.now()}.mp3`);
+
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({
+      text,
+      model_id: "eleven_multilingual_v2",
+      voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+    });
+
+    const req = https.request({
+      hostname: "api.elevenlabs.io",
+      path:     `/v1/text-to-speech/${voiceId}`,
+      method:   "POST",
+      headers:  {
+        "xi-api-key":   apiKey,
+        "Content-Type": "application/json",
+        "Accept":       "audio/mpeg",
+        "Content-Length": Buffer.byteLength(body),
+      },
+    }, res => {
+      if (res.statusCode !== 200) {
+        let err = "";
+        res.on("data", d => err += d);
+        res.on("end", () => reject(new Error(`ElevenLabs ${res.statusCode}: ${err.slice(0, 100)}`)));
+        return;
+      }
+      const file = fs.createWriteStream(outFile);
+      res.pipe(file);
+      file.on("finish", () => { file.close(); resolve(outFile); });
+      file.on("error", reject);
+    });
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+// Stream TTS como recurso de audio
+function createTTSResource(mp3File) {
+  const ffmpeg = spawn("ffmpeg", [
+    "-i",        mp3File,
+    "-f",        "s16le",
+    "-ar",       "48000",
+    "-ac",       "2",
+    "-loglevel", "error",
+    "pipe:1",
+  ]);
+  ffmpeg.stderr.on("data", d => console.error("[ffmpeg tts]", d.toString().trim()));
+  return createAudioResource(ffmpeg.stdout, { inputType: StreamType.Raw });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// YOUTUBE STREAM (yt-dlp + ffmpeg)
+// ─────────────────────────────────────────────────────────────────────────────
 async function getYouTubeStream(searchQuery) {
-  // 1. Buscar URL con play-dl
   const results = await playdl.search(searchQuery, { source: { youtube: "video" }, limit: 1 });
   if (!results || results.length === 0) throw new Error("No se encontró en YouTube.");
   const video = results[0];
-  console.log(`[Musica] YouTube URL: ${video.url}`);
+  console.log(`[Musica] YouTube: ${video.url}`);
 
-  // 2. yt-dlp obtiene la URL directa del audio
   const ytUrl = await new Promise((resolve, reject) => {
     const ytdlp = spawn("yt-dlp", [
-      "--no-playlist",
-      "-f", "bestaudio",
-      "--get-url",
-      video.url,
+      "--no-playlist", "-f", "bestaudio", "--get-url", video.url,
     ]);
     let out = "", err = "";
     ytdlp.stdout.on("data", d => out += d.toString());
     ytdlp.stderr.on("data", d => err += d.toString());
     ytdlp.on("close", code => {
       const url = out.trim().split("\n")[0];
-      if (code !== 0 || !url) return reject(new Error("yt-dlp error: " + err.trim().slice(0, 100)));
+      if (code !== 0 || !url) return reject(new Error("yt-dlp: " + err.trim().slice(0, 100)));
       resolve(url);
     });
   });
 
-  // 3. ffmpeg convierte a PCM s16le para @discordjs/voice
   const ffmpeg = spawn("ffmpeg", [
-    "-reconnect",            "1",
-    "-reconnect_streamed",   "1",
-    "-reconnect_delay_max",  "5",
-    "-i",                    ytUrl,
-    "-f",                    "s16le",
-    "-ar",                   "48000",
-    "-ac",                   "2",
-    "-loglevel",             "error",
+    "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
+    "-i",        ytUrl,
+    "-f",        "s16le",
+    "-ar",       "48000",
+    "-ac",       "2",
+    "-loglevel", "error",
     "pipe:1",
   ]);
-
   ffmpeg.stderr.on("data", d => console.error("[ffmpeg]", d.toString().trim()));
   ffmpeg.on("error", e => console.error("[ffmpeg error]", e.message));
 
@@ -145,14 +296,102 @@ async function getYouTubeStream(searchQuery) {
   };
 }
 
-// ── Cola de reproducción ─────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// AUTOCOLA
+// ─────────────────────────────────────────────────────────────────────────────
+async function fillAutocola(guildId, queue) {
+  try {
+    const history = await getRecentHistory(guildId, 5);
+    const seedIds = history.filter(h => h.spotify_id).map(h => h.spotify_id);
+    if (seedIds.length === 0) return false;
+
+    // Usar el track más reciente como seed
+    const recs = await getSpotifyRecommendations(seedIds[0], 5);
+    if (!recs || recs.length === 0) return false;
+
+    // Evitar duplicar lo que ya está en cola o historial reciente
+    const recentTitles = new Set(history.map(h => h.title.toLowerCase()));
+    const filtered = recs.filter(r => !recentTitles.has(r.title.toLowerCase()));
+
+    if (filtered.length === 0) return false;
+    queue.push(...filtered);
+    console.log(`[Musica] Autocola: añadidas ${filtered.length} canciones`);
+    return true;
+  } catch (e) {
+    console.error("[Musica] Error autocola:", e.message);
+    return false;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COLA DE REPRODUCCIÓN
+// ─────────────────────────────────────────────────────────────────────────────
 const queues = new Map();
 
-async function playNext(guildId) {
+async function playNext(guildId, client) {
+  const q = queues.get(guildId);
+  if (!q) return;
+
+  // Cola vacía → intentar autocola
+  if (q.queue.length === 0) {
+    const filled = await fillAutocola(guildId, q.queue);
+
+    if (!filled || q.queue.length === 0) {
+      q?.textChannel?.send({ content: "✅ Cola terminada. 👋" }).catch(() => {});
+      try { q?.connection?.destroy(); } catch {}
+      queues.delete(guildId);
+      return;
+    }
+
+    // Anunciar autocola con TTS
+    await playTTSAndThen(q, getAutocolaPhrase(), guildId, client);
+    return;
+  }
+
+  const track = q.queue[0];
+
+  // Contar usuarios en el canal de voz (sin contar bots)
+  const voiceChannel = q.connection?.joinConfig?.channelId
+    ? client?.channels?.cache.get(q.connection.joinConfig.channelId)
+    : null;
+  const userCount = voiceChannel?.members?.filter(m => !m.user.bot)?.size || 2;
+
+  // Frase de DJ antes de reproducir (solo si no es la primera canción)
+  if (q.current && track.artist) {
+    await playTTSAndThen(q, getDJPhrase(track.artist), guildId, client, true);
+    return;
+  }
+
+  await startTrack(guildId, client);
+}
+
+async function playTTSAndThen(q, text, guildId, client, thenPlay = false) {
+  console.log(`[DJ] TTS: "${text}"`);
+  try {
+    const ttsFile = await generateTTS(text);
+    if (!ttsFile) {
+      if (thenPlay) await startTrack(guildId, client);
+      else await startTrack(guildId, client);
+      return;
+    }
+
+    const resource = createTTSResource(ttsFile);
+    q.player.play(resource);
+
+    // Cuando termine el TTS, reproducir la canción
+    q.player.once(AudioPlayerStatus.Idle, async () => {
+      try { fs.unlinkSync(ttsFile); } catch {}
+      await startTrack(guildId, client);
+    });
+  } catch (e) {
+    console.error("[DJ] Error TTS:", e.message);
+    await startTrack(guildId, client);
+  }
+}
+
+async function startTrack(guildId, client) {
   const q = queues.get(guildId);
   if (!q || q.queue.length === 0) {
-    q?.textChannel?.send({ content: "✅ Cola terminada. 👋" }).catch(() => {});
-    try { q?.connection?.destroy(); } catch {}
     queues.delete(guildId);
     return;
   }
@@ -161,43 +400,42 @@ async function playNext(guildId) {
   q.current   = track;
 
   try {
-    console.log(`[Musica] Preparando: ${track.searchQuery}`);
     const yt = await getYouTubeStream(track.searchQuery);
-
-    const resource = createAudioResource(yt.stream, {
-      inputType: StreamType.Raw,
-    });
-
-    q.player.play(resource);
-
     if (!track.thumbnail) track.thumbnail = yt.thumbnail;
     if (!track.duration || track.duration === "?") track.duration = yt.duration;
 
+    const resource = createAudioResource(yt.stream, { inputType: StreamType.Raw });
+    q.player.play(resource);
+
+    // Guardar en historial
+    await saveToHistory(guildId, track.requestedById || null, track);
+
+    const autocolaLabel = track.isAutocola ? " `🤖 autocola`" : "";
     q.textChannel?.send({
       embeds: [new EmbedBuilder()
-        .setColor("#1DB954")
-        .setTitle("🎵 Reproduciendo ahora")
-        .setDescription(`**[${track.title}](${track.spotifyUrl || yt.url})**`)
+        .setColor(track.isAutocola ? "#8B5CF6" : "#1DB954")
+        .setTitle("🎵 Reproduciendo ahora" + (track.isAutocola ? " — Autocola" : ""))
+        .setDescription(`**[${track.title}](${track.spotifyUrl || yt.url})**${autocolaLabel}`)
         .setThumbnail(track.thumbnail || null)
         .addFields(
           { name: "⏱️ Duración",   value: track.duration || yt.duration || "?", inline: true },
-          { name: "👤 Solicitado", value: track.requestedBy || "-",              inline: true },
-          { name: "🎬 Fuente",     value: `[YouTube](${yt.url})`,                inline: true },
+          { name: "👤 Solicitado", value: track.isAutocola ? "🤖 Autocola" : (track.requestedBy || "-"), inline: true },
+          { name: "🎬 Fuente",     value: `[YouTube](${yt.url})`, inline: true },
         )
         .setFooter({ text: "NexaBot Music • Spotify + YouTube" })
       ]
     }).catch(() => {});
 
-    console.log(`[Musica] ▶️ ${track.title}`);
+    console.log(`[Musica] ▶️ ${track.title}${track.isAutocola ? " (autocola)" : ""}`);
 
   } catch (e) {
     console.error(`[Musica] Error stream: ${e.message}`);
     q?.textChannel?.send({ content: `${EMOJI.CRUZ} Error reproduciendo **${track.title}**: ${e.message}` }).catch(() => {});
-    setTimeout(() => playNext(guildId), 1000);
+    setTimeout(() => startTrack(guildId, client), 1000);
   }
 }
 
-async function addToQueue(guildId, voiceChannel, textChannel, track) {
+async function addToQueue(guildId, voiceChannel, textChannel, track, client) {
   let q = queues.get(guildId);
 
   if (!q) {
@@ -220,13 +458,13 @@ async function addToQueue(guildId, voiceChannel, textChannel, track) {
     const player = createAudioPlayer();
     connection.subscribe(player);
 
-    player.on(AudioPlayerStatus.Idle,      () => playNext(guildId));
+    player.on(AudioPlayerStatus.Idle, () => playNext(guildId, client));
     player.on(AudioPlayerStatus.Playing,   () => console.log("[Musica] ▶️ Playing"));
     player.on(AudioPlayerStatus.Buffering, () => console.log("[Musica] ⏳ Buffering..."));
     player.on("error", err => {
       console.error("[Musica] Player error:", err.message);
-      queues.get(guildId)?.textChannel?.send({ content: `${EMOJI.CRUZ} Error de audio: ${err.message}` }).catch(() => {});
-      setTimeout(() => playNext(guildId), 1000);
+      queues.get(guildId)?.textChannel?.send({ content: `${EMOJI.CRUZ} Error: ${err.message}` }).catch(() => {});
+      setTimeout(() => startTrack(guildId, client), 1000);
     });
 
     connection.on(VoiceConnectionStatus.Disconnected, async () => {
@@ -241,9 +479,9 @@ async function addToQueue(guildId, voiceChannel, textChannel, track) {
       }
     });
 
-    q = { connection, player, queue: [track], current: null, textChannel, volume: 100 };
+    q = { connection, player, queue: [track], current: null, textChannel };
     queues.set(guildId, q);
-    playNext(guildId);
+    await startTrack(guildId, client);
 
   } else {
     q.queue.push(track);
@@ -263,13 +501,15 @@ async function addToQueue(guildId, voiceChannel, textChannel, track) {
   }
 }
 
-// ── Comando Slash ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// COMANDO SLASH
+// ─────────────────────────────────────────────────────────────────────────────
 module.exports = {
   setupPlayer: async () => {},
 
   data: new SlashCommandBuilder()
     .setName("musica")
-    .setDescription("Sistema de música (Spotify + YouTube)")
+    .setDescription("Sistema de música (Spotify + YouTube + Autocola IA)")
     .addSubcommand(s => s
       .setName("play")
       .setDescription("Reproduce una canción")
@@ -284,6 +524,7 @@ module.exports = {
     .addSubcommand(s => s.setName("skip").setDescription("Salta a la siguiente canción"))
     .addSubcommand(s => s.setName("stop").setDescription("Para la música y vacía la cola"))
     .addSubcommand(s => s.setName("cola").setDescription("Muestra la cola actual"))
+    .addSubcommand(s => s.setName("historial").setDescription("Muestra las últimas canciones reproducidas"))
     .addSubcommand(s => s
       .setName("volumen")
       .setDescription("Cambia el volumen (1-100)")
@@ -297,7 +538,8 @@ module.exports = {
     ),
 
   async execute(interaction) {
-    const sub = interaction.options.getSubcommand();
+    const sub    = interaction.options.getSubcommand();
+    const client = interaction.client;
 
     if (sub === "play") {
       const vc = interaction.member?.voice?.channel;
@@ -313,18 +555,22 @@ module.exports = {
           trackInfo = await searchSpotify(busqueda);
           console.log(`[Musica] Spotify: ${trackInfo.title}`);
         } catch (e) {
-          console.warn("[Musica] Spotify falló, búsqueda directa:", e.message);
+          console.warn("[Musica] Spotify falló:", e.message);
           trackInfo = {
             searchQuery: busqueda,
             title:       busqueda,
+            artist:      busqueda.split("-")[0]?.trim() || busqueda,
             spotifyUrl:  null,
+            spotifyId:   null,
             thumbnail:   null,
             duration:    "?",
           };
         }
 
-        trackInfo.requestedBy = interaction.user.toString();
-        await addToQueue(interaction.guildId, vc, interaction.channel, trackInfo);
+        trackInfo.requestedBy   = interaction.user.toString();
+        trackInfo.requestedById = interaction.user.id;
+
+        await addToQueue(interaction.guildId, vc, interaction.channel, trackInfo, client);
         await interaction.editReply({
           content: `${EMOJI.CHECK} Buscando **${trackInfo.title}** en YouTube...`
         });
@@ -334,6 +580,25 @@ module.exports = {
         await interaction.editReply({ content: `${EMOJI.CRUZ} Error: ${e.message}` });
       }
       return;
+    }
+
+    if (sub === "historial") {
+      const history = await getRecentHistory(interaction.guildId, 10);
+      if (history.length === 0)
+        return interaction.reply({ content: "📭 No hay historial de canciones aún.", flags: 64 });
+
+      const lista = history
+        .map((h, i) => `${i + 1}. **${h.title}** — <t:${Math.floor(new Date(h.played_at).getTime() / 1000)}:R>`)
+        .join("\n");
+
+      return interaction.reply({
+        embeds: [new EmbedBuilder()
+          .setColor("#1DB954")
+          .setTitle("📜 Historial de canciones")
+          .setDescription(lista)
+          .setFooter({ text: "NexaBot Music • Últimas 10 canciones" })
+        ]
+      });
     }
 
     const q = queues.get(interaction.guildId);
@@ -353,11 +618,13 @@ module.exports = {
     }
 
     if (sub === "cola") {
+      const autocolaCount = q.queue.filter(t => t.isAutocola).length;
       const lista = [
         q.current
           ? `▶️ **${q.current.title}** - ${q.current.duration || "?"} *(reproduciendo)*`
           : "(nada reproduciendo)",
-        ...q.queue.slice(0, 9).map((t, i) => `${i + 1}. **${t.title}** - ${t.duration || "?"}`)
+        ...q.queue.slice(0, 9).map((t, i) =>
+          `${i + 1}. **${t.title}** - ${t.duration || "?"}${t.isAutocola ? " 🤖" : ""}`)
       ].join("\n");
 
       return interaction.reply({
@@ -365,7 +632,11 @@ module.exports = {
           .setColor("#1DB954")
           .setTitle("🎵 Cola de reproducción")
           .setDescription(lista || "La cola está vacía.")
-          .setFooter({ text: `${q.queue.length + (q.current ? 1 : 0)} canciones en total` })
+          .addFields(
+            { name: "📋 Total",    value: `${q.queue.length + (q.current ? 1 : 0)}`, inline: true },
+            { name: "🤖 Autocola", value: `${autocolaCount}`, inline: true },
+          )
+          .setFooter({ text: "NexaBot Music • 🤖 = sugerencia automática" })
         ]
       });
     }
