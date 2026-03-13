@@ -1,5 +1,5 @@
 // commands/musica.js
-// Spotify + YouTube (yt-dlp) + ElevenLabs DJ + Autocola + Barra de progreso
+// Spotify + YouTube (yt-dlp) + gTTS DJ + Autocola + Barra de progreso
 
 const { SlashCommandBuilder, EmbedBuilder } = require("discord.js");
 const {
@@ -215,42 +215,21 @@ const getDJPhrase    = a => DJ_PHRASES[Math.floor(Math.random() * DJ_PHRASES.len
 const getAutocolaPhrase = () => AUTOCOLA_PHRASES[Math.floor(Math.random() * AUTOCOLA_PHRASES.length)];
 
 async function generateTTS(text) {
-  const apiKey  = process.env.ELEVENLABS_API_KEY;
-  const voiceId = process.env.ELEVENLABS_VOICE_ID;
-  if (!apiKey || !voiceId) return null;
-
   const outFile = path.join(TMP_DIR, `tts_${Date.now()}.mp3`);
   return new Promise((resolve, reject) => {
-    const body = JSON.stringify({
-      text,
-      model_id: "eleven_multilingual_v2",
-      voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+    const safeText = text.replace(/"/g, "'").replace(/
+/g, " ");
+    const gtts = spawn("python3", ["-c", `
+from gtts import gTTS
+tts = gTTS(text="${safeText}", lang='es', slow=False)
+tts.save('${outFile}')
+`]);
+    let err = "";
+    gtts.stderr.on("data", d => err += d.toString());
+    gtts.on("close", code => {
+      if (code !== 0) return reject(new Error("gTTS error: " + err.trim().slice(0, 100)));
+      resolve(outFile);
     });
-    const req = https.request({
-      hostname: "api.elevenlabs.io",
-      path:     `/v1/text-to-speech/${voiceId}`,
-      method:   "POST",
-      headers:  {
-        "xi-api-key":     apiKey,
-        "Content-Type":   "application/json",
-        "Accept":         "audio/mpeg",
-        "Content-Length": Buffer.byteLength(body),
-      },
-    }, res => {
-      if (res.statusCode !== 200) {
-        let err = "";
-        res.on("data", d => err += d);
-        res.on("end", () => reject(new Error(`ElevenLabs ${res.statusCode}: ${err.slice(0, 100)}`)));
-        return;
-      }
-      const file = fs.createWriteStream(outFile);
-      res.pipe(file);
-      file.on("finish", () => { file.close(); resolve(outFile); });
-      file.on("error",  reject);
-    });
-    req.on("error", reject);
-    req.write(body);
-    req.end();
   });
 }
 
