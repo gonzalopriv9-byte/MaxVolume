@@ -1,6 +1,6 @@
 // commands/musica.js
-// Búsqueda via Spotify API → reproducción via YouTube (ytdl-core)
-// play-dl solo se usa para buscar, ytdl-core para el stream
+// Búsqueda via Spotify API → stream via yt-dlp + ffmpeg
+// yt-dlp siempre actualizado, sin problemas de extracción
 
 const { SlashCommandBuilder, EmbedBuilder } = require("discord.js");
 const {
@@ -13,7 +13,7 @@ const {
   StreamType,
 } = require("@discordjs/voice");
 const playdl = require("play-dl");
-const ytdl   = require("ytdl-core");
+const { spawn } = require("child_process");
 const https  = require("https");
 
 const EMOJI = {
@@ -94,22 +94,50 @@ function msToTime(ms) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
-// ── YouTube: buscar con play-dl, stream con ytdl-core ───────────────────────
+// ── YouTube: buscar con play-dl, stream con yt-dlp + ffmpeg ─────────────────
 async function getYouTubeStream(searchQuery) {
+  // 1. Buscar URL con play-dl
   const results = await playdl.search(searchQuery, { source: { youtube: "video" }, limit: 1 });
   if (!results || results.length === 0) throw new Error("No se encontró en YouTube.");
-
-  const video  = results[0];
+  const video = results[0];
   console.log(`[Musica] YouTube URL: ${video.url}`);
 
-  const stream = ytdl(video.url, {
-    filter:         "audioonly",
-    quality:        "highestaudio",
-    highWaterMark:  1 << 25,
+  // 2. yt-dlp obtiene la URL directa del audio
+  const ytUrl = await new Promise((resolve, reject) => {
+    const ytdlp = spawn("yt-dlp", [
+      "--no-playlist",
+      "-f", "bestaudio",
+      "--get-url",
+      video.url,
+    ]);
+    let out = "", err = "";
+    ytdlp.stdout.on("data", d => out += d.toString());
+    ytdlp.stderr.on("data", d => err += d.toString());
+    ytdlp.on("close", code => {
+      const url = out.trim().split("\n")[0];
+      if (code !== 0 || !url) return reject(new Error("yt-dlp error: " + err.trim().slice(0, 100)));
+      resolve(url);
+    });
   });
 
+  // 3. ffmpeg convierte a PCM s16le para @discordjs/voice
+  const ffmpeg = spawn("ffmpeg", [
+    "-reconnect",            "1",
+    "-reconnect_streamed",   "1",
+    "-reconnect_delay_max",  "5",
+    "-i",                    ytUrl,
+    "-f",                    "s16le",
+    "-ar",                   "48000",
+    "-ac",                   "2",
+    "-loglevel",             "error",
+    "pipe:1",
+  ]);
+
+  ffmpeg.stderr.on("data", d => console.error("[ffmpeg]", d.toString().trim()));
+  ffmpeg.on("error", e => console.error("[ffmpeg error]", e.message));
+
   return {
-    stream,
+    stream:    ffmpeg.stdout,
     title:     video.title,
     url:       video.url,
     duration:  video.durationRaw,
@@ -133,11 +161,11 @@ async function playNext(guildId) {
   q.current   = track;
 
   try {
-    console.log(`[Musica] Buscando en YouTube: ${track.searchQuery}`);
+    console.log(`[Musica] Preparando: ${track.searchQuery}`);
     const yt = await getYouTubeStream(track.searchQuery);
 
     const resource = createAudioResource(yt.stream, {
-      inputType: StreamType.Arbitrary,
+      inputType: StreamType.Raw,
     });
 
     q.player.play(resource);
@@ -160,7 +188,7 @@ async function playNext(guildId) {
       ]
     }).catch(() => {});
 
-    console.log(`[Musica] ▶️ Reproduciendo: ${track.title}`);
+    console.log(`[Musica] ▶️ ${track.title}`);
 
   } catch (e) {
     console.error(`[Musica] Error stream: ${e.message}`);
@@ -177,7 +205,7 @@ async function addToQueue(guildId, voiceChannel, textChannel, track) {
       channelId:      voiceChannel.id,
       guildId,
       adapterCreator: voiceChannel.guild.voiceAdapterCreator,
-      selfDeaf:       false,  // NO ensordecerse
+      selfDeaf:       false,
       selfMute:       false,
     });
 
