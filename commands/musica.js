@@ -1,7 +1,7 @@
 // commands/musica.js
-// Spotify + YouTube (yt-dlp) + Edge TTS DJ + Autocola + Barra de progreso
+// Spotify + YouTube (yt-dlp) + Edge TTS DJ + Autocola + Barra de progreso + Botones
 
-const { SlashCommandBuilder, EmbedBuilder } = require("discord.js");
+const { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
 const {
   joinVoiceChannel,
   createAudioPlayer,
@@ -27,8 +27,22 @@ const EMOJI = {
   LOADING:  "<a:Loading:1481763726972555324>",
 };
 
+const EDGE_TTS_PATH = "/home/pi/.local/bin/edge-tts";
 const TMP_DIR = "/tmp/nexabot_tts";
 if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BOTONES DE CONTROL
+// ─────────────────────────────────────────────────────────────────────────────
+function buildControlButtons(paused = false) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("music_skip")   .setLabel("⏭️ Skip")                        .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("music_pause")  .setLabel(paused ? "▶️ Reanudar" : "⏸️ Pausa").setStyle(paused ? ButtonStyle.Success : ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId("music_stop")   .setLabel("⏹️ Stop")                        .setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId("music_vol_up") .setLabel("🔊 +10%")                         .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("music_vol_down").setLabel("🔉 -10%")                        .setStyle(ButtonStyle.Secondary),
+  );
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // BARRA DE PROGRESO
@@ -159,7 +173,7 @@ async function getRecentHistory(guildId, limit = 10) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// gTTS
+// EDGE TTS
 // ─────────────────────────────────────────────────────────────────────────────
 const DJ_PHRASES = [
   "Y como estamos de fiesta, ahora os dejo con un poco de {artist}",
@@ -182,13 +196,14 @@ async function generateTTS(text) {
   const outFile  = path.join(TMP_DIR, `tts_${Date.now()}.mp3`);
   const safeText = text.replace(/"/g, "'").replace(/\n/g, " ");
   return new Promise((resolve, reject) => {
-    const tts = spawn("edge-tts", [
-      "--voice", "es-ES-AlvaroNeural",
-      "--text",  safeText,
+    const tts = spawn(EDGE_TTS_PATH, [
+      "--voice",       "es-ES-AlvaroNeural",
+      "--text",        safeText,
       "--write-media", outFile,
     ]);
     let err = "";
     tts.stderr.on("data", d => err += d.toString());
+    tts.on("error", e => reject(new Error("edge-tts spawn: " + e.message)));
     tts.on("close", code => {
       if (code !== 0) return reject(new Error("edge-tts: " + err.trim().slice(0, 100)));
       resolve(outFile);
@@ -249,18 +264,17 @@ async function getYouTubeStream(searchQuery) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AUTOCOLA — busca canciones del mismo artista en Spotify
+// AUTOCOLA — canciones del mismo artista via Spotify search
 // ─────────────────────────────────────────────────────────────────────────────
 async function fillAutocola(guildId, queue) {
   console.log("[Autocola] Buscando recomendaciones para guild:", guildId);
   try {
     const history = await getRecentHistory(guildId, 10);
-    console.log("[Autocola] Historial:", history.length, "entradas");
     if (history.length === 0) return false;
 
     const artists = [...new Set(history.filter(h => h.artist).map(h => h.artist))];
-    console.log("[Autocola] Artistas:", artists);
     if (artists.length === 0) return false;
+    console.log("[Autocola] Artistas:", artists.slice(0, 3));
 
     const recentTitles = new Set(history.map(h => h.title.toLowerCase()));
     const recs = [];
@@ -268,7 +282,7 @@ async function fillAutocola(guildId, queue) {
     for (const artist of artists.slice(0, 3)) {
       try {
         const token  = await getSpotifyToken();
-        const tracks = await new Promise((resolve) => {
+        const tracks = await new Promise(resolve => {
           https.get({
             hostname: "api.spotify.com",
             path:     `/v1/search?q=artist:${encodeURIComponent(artist)}&type=track&limit=5`,
@@ -310,43 +324,57 @@ async function fillAutocola(guildId, queue) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// BARRA DE PROGRESO
+// BARRA DE PROGRESO + BOTONES (embed que se actualiza cada 2s)
 // ─────────────────────────────────────────────────────────────────────────────
 function startProgressBar(q, track, ytUrl) {
   stopProgressBar(q);
   const totalSec  = track.durationSec || 0;
   const startTime = Date.now();
 
-  const buildEmbed = elapsed => new EmbedBuilder()
+  const buildEmbed = (elapsed, paused = false) => new EmbedBuilder()
     .setColor(track.isAutocola ? "#8B5CF6" : "#1DB954")
-    .setTitle("🎵 " + track.title)
+    .setTitle((paused ? "⏸️" : "🎵") + " " + track.title)
     .setURL(track.spotifyUrl || ytUrl || null)
     .setThumbnail(track.thumbnail || null)
     .setDescription(
       buildProgressBar(elapsed, totalSec) + "\n" +
-      `⏱️ \`${fmtTime(elapsed)}\` / \`${fmtTime(totalSec)}\``
+      `⏱️ \`${fmtTime(elapsed)}\` / \`${fmtTime(totalSec)}\`` +
+      (track.isAutocola ? "\n🤖 *Sugerencia automática*" : "")
     )
     .addFields(
       { name: "👤 Solicitado", value: track.isAutocola ? "🤖 Autocola" : (track.requestedBy || "-"), inline: true },
       { name: "🎬 Fuente",    value: ytUrl ? `[YouTube](${ytUrl})` : "-", inline: true },
+      { name: "🔊 Volumen",   value: `${q.volume || 100}%`, inline: true },
     )
-    .setFooter({ text: "NexaBot Music" });
+    .setFooter({ text: "NexaBot Music • usa los botones para controlar" });
 
-  q.textChannel?.send({ embeds: [buildEmbed(0)] })
-    .then(msg => {
-      q.progressMsg = msg;
-      q.progressInterval = setInterval(async () => {
-        const elapsed = Math.floor((Date.now() - startTime) / 1000);
-        try { await msg.edit({ embeds: [buildEmbed(elapsed)] }); }
-        catch { clearInterval(q.progressInterval); q.progressInterval = null; }
-      }, 2000);
-    })
-    .catch(() => {});
+  q.textChannel?.send({
+    embeds: [buildEmbed(0)],
+    components: [buildControlButtons(false)],
+  }).then(msg => {
+    q.progressMsg      = msg;
+    q.progressPaused   = false;
+    q.progressInterval = setInterval(async () => {
+      if (!queues.has(q._guildId)) { clearInterval(q.progressInterval); return; }
+      const elapsed = q.progressPaused ? q.pausedAt || 0 : Math.floor((Date.now() - startTime) / 1000);
+      try {
+        await msg.edit({
+          embeds:     [buildEmbed(elapsed, q.progressPaused)],
+          components: [buildControlButtons(q.progressPaused)],
+        });
+      } catch { clearInterval(q.progressInterval); q.progressInterval = null; }
+    }, 2000);
+  }).catch(() => {});
+
+  // Guardar referencia al guildId en q para el intervalo
+  q._guildId   = track._guildId;
+  q._buildEmbed = buildEmbed;
 }
 
 function stopProgressBar(q) {
   if (q.progressInterval) { clearInterval(q.progressInterval); q.progressInterval = null; }
   if (q.progressMsg)      { q.progressMsg.delete().catch(() => {}); q.progressMsg = null; }
+  q.progressPaused = false;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -412,14 +440,15 @@ async function startTrack(guildId, client) {
     return;
   }
 
-  const track = q.queue.shift();
-  q.current   = track;
+  const track    = q.queue.shift();
+  q.current      = track;
+  track._guildId = guildId;
 
   if (q.safetyTimeout) { clearTimeout(q.safetyTimeout); q.safetyTimeout = null; }
 
   try {
     const yt = await getYouTubeStream(track.searchQuery);
-    if (!track.thumbnail)                         track.thumbnail  = yt.thumbnail;
+    if (!track.thumbnail)                              track.thumbnail  = yt.thumbnail;
     if (!track.duration   || track.duration   === "?") track.duration   = yt.duration;
     if (!track.durationSec || track.durationSec === 0)  track.durationSec = yt.durationSec;
 
@@ -474,13 +503,16 @@ async function addToQueue(guildId, voiceChannel, textChannel, track, client) {
       const q2 = queues.get(guildId);
       if (!q2) return;
       if (q2.safetyTimeout) { clearTimeout(q2.safetyTimeout); q2.safetyTimeout = null; }
-      if (!q2.playingTTS) { console.log("[Musica] Idle → playNext"); stopProgressBar(q2); playNext(guildId, client); }
+      if (!q2.playingTTS) {
+        console.log("[Musica] Idle → playNext");
+        stopProgressBar(q2);
+        playNext(guildId, client);
+      }
     });
 
+    // AutoPaused = no hay nadie escuchando, ignorar
     player.on(AudioPlayerStatus.AutoPaused, () => {
-      console.log("[Musica] AutoPaused → playNext");
-      const q2 = queues.get(guildId);
-      if (q2 && !q2.playingTTS) { stopProgressBar(q2); playNext(guildId, client); }
+      console.log("[Musica] AutoPaused — ignorando");
     });
 
     player.on(AudioPlayerStatus.Playing,   () => console.log("[Musica] ▶️ Playing"));
@@ -513,8 +545,11 @@ async function addToQueue(guildId, voiceChannel, textChannel, track, client) {
       playingTTS:       false,
       progressMsg:      null,
       progressInterval: null,
+      progressPaused:   false,
+      pausedAt:         0,
       safetyTimeout:    null,
       currentFfmpeg:    null,
+      volume:           100,
     };
     queues.set(guildId, q);
     await startTrack(guildId, client);
@@ -538,10 +573,75 @@ async function addToQueue(guildId, voiceChannel, textChannel, track, client) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// HANDLER DE BOTONES (exportado para usar en interactionCreate del index.js)
+// ─────────────────────────────────────────────────────────────────────────────
+async function handleMusicButton(interaction) {
+  const guildId = interaction.guildId;
+  const q       = queues.get(guildId);
+
+  if (!q) return interaction.reply({ content: `${EMOJI.CRUZ} No hay música reproduciéndose.`, flags: 64 });
+
+  const id      = interaction.customId;
+  const isAdmin = interaction.member?.permissions?.has("Administrator");
+
+  if (id === "music_skip") {
+    const current = q.current;
+    if (!current) return interaction.reply({ content: `${EMOJI.CRUZ} No hay canción activa.`, flags: 64 });
+    if (!current.isAutocola && current.requestedById && current.requestedById !== interaction.user.id && !isAdmin) {
+      return interaction.reply({
+        content: `${EMOJI.CRUZ} Solo <@${current.requestedById}> o un administrador puede saltar esta canción.`,
+        flags: 64,
+      });
+    }
+    stopProgressBar(q);
+    if (q.safetyTimeout) { clearTimeout(q.safetyTimeout); q.safetyTimeout = null; }
+    q.player.stop();
+    return interaction.reply({ content: `⏭️ Canción saltada por ${interaction.user}.`, flags: 64 });
+  }
+
+  if (id === "music_pause") {
+    if (q.progressPaused) {
+      q.player.unpause();
+      q.progressPaused = false;
+      return interaction.reply({ content: "▶️ Música reanudada.", flags: 64 });
+    } else {
+      q.player.pause();
+      q.progressPaused = true;
+      q.pausedAt       = Math.floor((Date.now() - (q._startTime || Date.now())) / 1000);
+      return interaction.reply({ content: "⏸️ Música pausada.", flags: 64 });
+    }
+  }
+
+  if (id === "music_stop") {
+    if (!isAdmin && q.current?.requestedById !== interaction.user.id) {
+      return interaction.reply({ content: `${EMOJI.CRUZ} Solo un administrador puede parar la música.`, flags: 64 });
+    }
+    stopProgressBar(q);
+    if (q.safetyTimeout) { clearTimeout(q.safetyTimeout); q.safetyTimeout = null; }
+    q.queue = [];
+    q.player.stop();
+    try { q.connection.destroy(); } catch {}
+    queues.delete(guildId);
+    return interaction.reply({ content: "⏹️ Música detenida.", flags: 64 });
+  }
+
+  if (id === "music_vol_up") {
+    q.volume = Math.min((q.volume || 100) + 10, 200);
+    return interaction.reply({ content: `🔊 Volumen: **${q.volume}%**`, flags: 64 });
+  }
+
+  if (id === "music_vol_down") {
+    q.volume = Math.max((q.volume || 100) - 10, 10);
+    return interaction.reply({ content: `🔉 Volumen: **${q.volume}%**`, flags: 64 });
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // COMANDO SLASH
 // ─────────────────────────────────────────────────────────────────────────────
 module.exports = {
   setupPlayer: async () => {},
+  handleMusicButton,
 
   data: new SlashCommandBuilder()
     .setName("musica")
@@ -559,15 +659,14 @@ module.exports = {
     .addSubcommand(s => s.setName("historial").setDescription("Muestra las últimas canciones reproducidas"))
     .addSubcommand(s => s
       .setName("volumen")
-      .setDescription("Cambia el volumen (1-100)")
-      .addIntegerOption(o => o.setName("nivel").setDescription("Nivel de volumen").setRequired(true).setMinValue(1).setMaxValue(100))
+      .setDescription("Cambia el volumen (1-200)")
+      .addIntegerOption(o => o.setName("nivel").setDescription("Nivel de volumen").setRequired(true).setMinValue(10).setMaxValue(200))
     ),
 
   async execute(interaction) {
     const sub    = interaction.options.getSubcommand();
     const client = interaction.client;
 
-    // ── PLAY ──
     if (sub === "play") {
       const vc = interaction.member?.voice?.channel;
       if (!vc) return interaction.reply({ content: `${EMOJI.CRUZ} Debes estar en un canal de voz.`, flags: 64 });
@@ -595,15 +694,13 @@ module.exports = {
 
         const q = queues.get(interaction.guildId);
 
-        // ── Evitar duplicados en cola
+        // Evitar duplicados
         if (q) {
           const titleNorm = trackInfo.title.toLowerCase();
           const yaEnCola  = q.queue.some(t => t.title.toLowerCase() === titleNorm);
           const esActual  = q.current?.title?.toLowerCase() === titleNorm;
           if (yaEnCola || esActual) {
-            return interaction.editReply({
-              content: `${EMOJI.ADVERTENCIA || "⚠️"} **${trackInfo.title}** ya está en la cola.`
-            });
+            return interaction.editReply({ content: `⚠️ **${trackInfo.title}** ya está en la cola.` });
           }
         }
 
@@ -617,7 +714,6 @@ module.exports = {
       return;
     }
 
-    // ── HISTORIAL ──
     if (sub === "historial") {
       const history = await getRecentHistory(interaction.guildId, 10);
       if (history.length === 0) return interaction.reply({ content: "📭 No hay historial aún.", flags: 64 });
@@ -633,37 +729,34 @@ module.exports = {
       });
     }
 
-    // ── Resto requiere cola activa ──
     const q = queues.get(interaction.guildId);
     if (!q) return interaction.reply({ content: `${EMOJI.CRUZ} No hay música reproduciéndose.`, flags: 64 });
 
-    if (sub === "pause")  { q.player.pause();   return interaction.reply({ content: "⏸️ Música pausada." }); }
-    if (sub === "resume") { q.player.unpause(); return interaction.reply({ content: "▶️ Música reanudada." }); }
+    if (sub === "pause") {
+      q.player.pause(); q.progressPaused = true;
+      return interaction.reply({ content: "⏸️ Música pausada." });
+    }
+    if (sub === "resume") {
+      q.player.unpause(); q.progressPaused = false;
+      return interaction.reply({ content: "▶️ Música reanudada." });
+    }
 
-    // ── SKIP — solo quien pidió la canción (o admin) ──
     if (sub === "skip") {
       const current = q.current;
       const isAdmin = interaction.member?.permissions?.has("Administrator");
-
-      if (!current) {
-        return interaction.reply({ content: `${EMOJI.CRUZ} No hay canción reproduciéndose.`, flags: 64 });
-      }
-
-      // Las canciones de autocola las puede saltar cualquiera
+      if (!current) return interaction.reply({ content: `${EMOJI.CRUZ} No hay canción activa.`, flags: 64 });
       if (!current.isAutocola && current.requestedById && current.requestedById !== interaction.user.id && !isAdmin) {
         return interaction.reply({
           content: `${EMOJI.CRUZ} Solo <@${current.requestedById}> o un administrador puede saltar esta canción.`,
           flags: 64,
         });
       }
-
       stopProgressBar(q);
       if (q.safetyTimeout) { clearTimeout(q.safetyTimeout); q.safetyTimeout = null; }
       q.player.stop();
       return interaction.reply({ content: `⏭️ Canción saltada por ${interaction.user}.` });
     }
 
-    // ── STOP ──
     if (sub === "stop") {
       const isAdmin = interaction.member?.permissions?.has("Administrator");
       if (!isAdmin && q.current?.requestedById !== interaction.user.id) {
@@ -678,12 +771,11 @@ module.exports = {
       return interaction.reply({ content: "⏹️ Música detenida y cola vaciada." });
     }
 
-    // ── COLA ──
     if (sub === "cola") {
       const autocolaCount = q.queue.filter(t => t.isAutocola).length;
       const lista = [
         q.current
-          ? `▶️ **${q.current.title}** - ${q.current.duration || "?"} *(reproduciendo)* — ${q.current.isAutocola ? "🤖 Autocola" : (q.current.requestedBy || "-")}`
+          ? `▶️ **${q.current.title}** - ${q.current.duration || "?"} *(reproduciendo)* — ${q.current.isAutocola ? "🤖" : (q.current.requestedBy || "-")}`
           : "(nada)",
         ...q.queue.slice(0, 9).map((t, i) =>
           `${i + 1}. **${t.title}** - ${t.duration || "?"}${t.isAutocola ? " 🤖" : ` — ${t.requestedBy || "-"}`}`
@@ -696,13 +788,13 @@ module.exports = {
           .addFields(
             { name: "📋 Total",    value: `${q.queue.length + (q.current ? 1 : 0)}`, inline: true },
             { name: "🤖 Autocola", value: `${autocolaCount}`, inline: true },
+            { name: "🔊 Volumen",  value: `${q.volume || 100}%`, inline: true },
           )
           .setFooter({ text: "🤖 = sugerencia automática" })
         ]
       });
     }
 
-    // ── VOLUMEN ──
     if (sub === "volumen") {
       const nivel = interaction.options.getInteger("nivel");
       q.volume = nivel;
