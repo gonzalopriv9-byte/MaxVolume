@@ -124,36 +124,6 @@ async function searchSpotify(query) {
   });
 }
 
-async function getSpotifyRecommendations(seedTrackId, limit = 5) {
-  const token = await getSpotifyToken();
-  return new Promise((resolve, reject) => {
-    https.get({
-      hostname: "api.spotify.com",
-      path:     `/v1/recommendations?seed_tracks=${seedTrackId}&limit=${limit}`,
-      headers:  { Authorization: `Bearer ${token}` },
-    }, res => {
-      let data = "";
-      res.on("data", c => data += c);
-      res.on("end", () => {
-        try {
-          const tracks = JSON.parse(data || "{}")?.tracks || [];
-          resolve(tracks.map(t => ({
-            searchQuery: `${t.artists[0].name} - ${t.name}`,
-            title:       `${t.artists[0].name} - ${t.name}`,
-            artist:      t.artists[0].name,
-            spotifyUrl:  t.external_urls.spotify,
-            spotifyId:   t.id,
-            thumbnail:   t.album.images?.[0]?.url || null,
-            duration:    msToTime(t.duration_ms),
-            durationSec: Math.floor(t.duration_ms / 1000),
-            isAutocola:  true,
-          })));
-        } catch (e) { reject(new Error("Error recomendaciones: " + e.message)); }
-      });
-    }).on("error", reject);
-  });
-}
-
 function msToTime(ms) {
   const s = Math.floor(ms / 1000);
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
@@ -205,7 +175,7 @@ const AUTOCOLA_PHRASES = [
   "Sin peticiones nuevas, me encargo yo! Os traigo recomendaciones personalizadas",
 ];
 
-const getDJPhrase     = a  => DJ_PHRASES[Math.floor(Math.random() * DJ_PHRASES.length)].replace("{artist}", a);
+const getDJPhrase      = a  => DJ_PHRASES[Math.floor(Math.random() * DJ_PHRASES.length)].replace("{artist}", a);
 const getAutocolaPhrase = () => AUTOCOLA_PHRASES[Math.floor(Math.random() * AUTOCOLA_PHRASES.length)];
 
 async function generateTTS(text) {
@@ -259,15 +229,11 @@ async function getYouTubeStream(searchQuery) {
   ]);
   ff.stderr.on("data", d => {
     const msg = d.toString().trim();
-    // Solo loguear errores reales, ignorar TLS warnings menores
     if (!msg.includes("Error in the pull function") && !msg.includes("Connection reset")) {
       console.error("[ffmpeg]", msg);
     }
   });
   ff.on("error", e => console.error("[ffmpeg error]", e.message));
-
-  // Detectar cuando ffmpeg muere y notificar al stream
-  ff.stdout.on("end", () => console.log("[Musica] ffmpeg stream terminado"));
 
   return {
     stream:      ff.stdout,
@@ -281,33 +247,59 @@ async function getYouTubeStream(searchQuery) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AUTOCOLA
+// AUTOCOLA — busca canciones del mismo artista en Spotify
 // ─────────────────────────────────────────────────────────────────────────────
 async function fillAutocola(guildId, queue) {
   console.log("[Autocola] Buscando recomendaciones para guild:", guildId);
   try {
-    const history = await getRecentHistory(guildId, 5);
+    const history = await getRecentHistory(guildId, 10);
     console.log("[Autocola] Historial:", history.length, "entradas");
+    if (history.length === 0) return false;
 
-    const seedIds = history.filter(h => h.spotify_id).map(h => h.spotify_id);
-    console.log("[Autocola] Seed IDs disponibles:", seedIds.length);
-
-    if (seedIds.length === 0) {
-      console.log("[Autocola] Sin historial con spotify_id, cancelando");
-      return false;
-    }
-
-    const recs = await getSpotifyRecommendations(seedIds[0], 5);
-    console.log("[Autocola] Recomendaciones recibidas:", recs.length);
-
-    if (!recs || recs.length === 0) return false;
+    const artists = [...new Set(history.filter(h => h.artist).map(h => h.artist))];
+    console.log("[Autocola] Artistas:", artists);
+    if (artists.length === 0) return false;
 
     const recentTitles = new Set(history.map(h => h.title.toLowerCase()));
-    const filtered     = recs.filter(r => !recentTitles.has(r.title.toLowerCase()));
-    console.log("[Autocola] Canciones añadidas tras filtro:", filtered.length);
+    const recs = [];
 
-    if (filtered.length === 0) return false;
-    queue.push(...filtered);
+    for (const artist of artists.slice(0, 3)) {
+      try {
+        const token  = await getSpotifyToken();
+        const tracks = await new Promise((resolve) => {
+          https.get({
+            hostname: "api.spotify.com",
+            path:     `/v1/search?q=artist:${encodeURIComponent(artist)}&type=track&limit=5`,
+            headers:  { Authorization: `Bearer ${token}` },
+          }, res => {
+            let data = "";
+            res.on("data", c => data += c);
+            res.on("end", () => {
+              try {
+                const items = JSON.parse(data)?.tracks?.items || [];
+                resolve(items.map(t => ({
+                  searchQuery: `${t.artists[0].name} - ${t.name}`,
+                  title:       `${t.artists[0].name} - ${t.name}`,
+                  artist:      t.artists[0].name,
+                  spotifyUrl:  t.external_urls.spotify,
+                  spotifyId:   t.id,
+                  thumbnail:   t.album.images?.[0]?.url || null,
+                  duration:    msToTime(t.duration_ms),
+                  durationSec: Math.floor(t.duration_ms / 1000),
+                  isAutocola:  true,
+                })));
+              } catch { resolve([]); }
+            });
+          }).on("error", () => resolve([]));
+        });
+        recs.push(...tracks.filter(t => !recentTitles.has(t.title.toLowerCase())));
+      } catch (e) { console.error("[Autocola] Error artista:", e.message); }
+    }
+
+    const shuffled = recs.sort(() => Math.random() - 0.5).slice(0, 5);
+    console.log("[Autocola] Canciones añadidas:", shuffled.length);
+    if (shuffled.length === 0) return false;
+    queue.push(...shuffled);
     return true;
   } catch (e) {
     console.error("[Autocola] ERROR:", e.message);
@@ -316,7 +308,7 @@ async function fillAutocola(guildId, queue) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// BARRA DE PROGRESO — embed que se actualiza cada 2s
+// BARRA DE PROGRESO
 // ─────────────────────────────────────────────────────────────────────────────
 function startProgressBar(q, track, ytUrl) {
   stopProgressBar(q);
@@ -360,14 +352,12 @@ function stopProgressBar(q) {
 // ─────────────────────────────────────────────────────────────────────────────
 const queues = new Map();
 
-// Función central: decide qué hacer cuando termina una pista
 async function playNext(guildId, client) {
   const q = queues.get(guildId);
   if (!q || q.playingTTS) return;
 
   console.log(`[Musica] playNext — cola: ${q.queue.length} canciones`);
 
-  // Cola vacía → intentar autocola
   if (q.queue.length === 0) {
     const filled = await fillAutocola(guildId, q.queue);
     if (!filled || q.queue.length === 0) {
@@ -377,12 +367,10 @@ async function playNext(guildId, client) {
       queues.delete(guildId);
       return;
     }
-    // Anuncio de autocola con TTS
     await playTTSAndThen(q, getAutocolaPhrase(), guildId, client);
     return;
   }
 
-  // Hay canciones → TTS de DJ antes de la siguiente (si ya había una antes)
   const next = q.queue[0];
   if (q.current && next.artist) {
     await playTTSAndThen(q, getDJPhrase(next.artist), guildId, client);
@@ -393,10 +381,9 @@ async function playNext(guildId, client) {
 }
 
 async function playTTSAndThen(q, text, guildId, client) {
-  console.log(`[DJ] Generando TTS: "${text}"`);
+  console.log(`[DJ] TTS: "${text}"`);
   q.playingTTS = true;
   stopProgressBar(q);
-
   try {
     const ttsFile = await generateTTS(text);
     if (!ttsFile) { q.playingTTS = false; await startTrack(guildId, client); return; }
@@ -404,13 +391,11 @@ async function playTTSAndThen(q, text, guildId, client) {
     const resource = createTTSResource(ttsFile);
     q.player.play(resource);
 
-    // Una vez que el TTS termina → reproducir siguiente canción
     q.player.once(AudioPlayerStatus.Idle, async () => {
       q.playingTTS = false;
       try { fs.unlinkSync(ttsFile); } catch {}
       await startTrack(guildId, client);
     });
-
   } catch (e) {
     console.error("[DJ] Error TTS:", e.message);
     q.playingTTS = false;
@@ -428,14 +413,13 @@ async function startTrack(guildId, client) {
   const track = q.queue.shift();
   q.current   = track;
 
-  // Limpiar safety timeout anterior
   if (q.safetyTimeout) { clearTimeout(q.safetyTimeout); q.safetyTimeout = null; }
 
   try {
     const yt = await getYouTubeStream(track.searchQuery);
-    if (!track.thumbnail)  track.thumbnail  = yt.thumbnail;
-    if (!track.duration  || track.duration  === "?") track.duration  = yt.duration;
-    if (!track.durationSec || track.durationSec === 0) track.durationSec = yt.durationSec;
+    if (!track.thumbnail)                         track.thumbnail  = yt.thumbnail;
+    if (!track.duration   || track.duration   === "?") track.duration   = yt.duration;
+    if (!track.durationSec || track.durationSec === 0)  track.durationSec = yt.durationSec;
 
     const resource = createAudioResource(yt.stream, { inputType: StreamType.Raw });
     q.player.play(resource);
@@ -444,15 +428,11 @@ async function startTrack(guildId, client) {
     await saveToHistory(guildId, track.requestedById || null, track);
     startProgressBar(q, track, yt.url);
 
-    // Safety timeout: si ffmpeg muere sin disparar Idle, forzamos el siguiente
     if (track.durationSec > 0) {
       q.safetyTimeout = setTimeout(() => {
         console.log("[Musica] Safety timeout — forzando siguiente");
         const q2 = queues.get(guildId);
-        if (q2 && !q2.playingTTS) {
-          stopProgressBar(q2);
-          playNext(guildId, client);
-        }
+        if (q2 && !q2.playingTTS) { stopProgressBar(q2); playNext(guildId, client); }
       }, (track.durationSec + 20) * 1000);
     }
 
@@ -488,28 +468,21 @@ async function addToQueue(guildId, voiceChannel, textChannel, track, client) {
     const player = createAudioPlayer();
     connection.subscribe(player);
 
-    // Idle: canción o TTS terminó
     player.on(AudioPlayerStatus.Idle, () => {
       const q2 = queues.get(guildId);
       if (!q2) return;
-      // Limpiar safety timeout si existía
       if (q2.safetyTimeout) { clearTimeout(q2.safetyTimeout); q2.safetyTimeout = null; }
-      if (!q2.playingTTS) {
-        console.log("[Musica] Idle detectado → playNext");
-        stopProgressBar(q2);
-        playNext(guildId, client);
-      }
+      if (!q2.playingTTS) { console.log("[Musica] Idle → playNext"); stopProgressBar(q2); playNext(guildId, client); }
     });
 
     player.on(AudioPlayerStatus.AutoPaused, () => {
-      console.log("[Musica] AutoPaused → forzando playNext");
+      console.log("[Musica] AutoPaused → playNext");
       const q2 = queues.get(guildId);
       if (q2 && !q2.playingTTS) { stopProgressBar(q2); playNext(guildId, client); }
     });
 
     player.on(AudioPlayerStatus.Playing,   () => console.log("[Musica] ▶️ Playing"));
     player.on(AudioPlayerStatus.Buffering, () => console.log("[Musica] ⏳ Buffering..."));
-
     player.on("error", err => {
       console.error("[Musica] Player error:", err.message);
       const q2 = queues.get(guildId);
@@ -535,11 +508,11 @@ async function addToQueue(guildId, voiceChannel, textChannel, track, client) {
       connection, player,
       queue: [track], current: null,
       textChannel,
-      playingTTS:      false,
-      progressMsg:     null,
+      playingTTS:       false,
+      progressMsg:      null,
       progressInterval: null,
-      safetyTimeout:   null,
-      currentFfmpeg:   null,
+      safetyTimeout:    null,
+      currentFfmpeg:    null,
     };
     queues.set(guildId, q);
     await startTrack(guildId, client);
@@ -578,7 +551,7 @@ module.exports = {
     )
     .addSubcommand(s => s.setName("pause").setDescription("Pausa la reproducción"))
     .addSubcommand(s => s.setName("resume").setDescription("Reanuda la reproducción"))
-    .addSubcommand(s => s.setName("skip").setDescription("Salta a la siguiente canción"))
+    .addSubcommand(s => s.setName("skip").setDescription("Salta la canción actual (solo quien la pidió)"))
     .addSubcommand(s => s.setName("stop").setDescription("Para la música y vacía la cola"))
     .addSubcommand(s => s.setName("cola").setDescription("Muestra la cola actual"))
     .addSubcommand(s => s.setName("historial").setDescription("Muestra las últimas canciones reproducidas"))
@@ -592,6 +565,7 @@ module.exports = {
     const sub    = interaction.options.getSubcommand();
     const client = interaction.client;
 
+    // ── PLAY ──
     if (sub === "play") {
       const vc = interaction.member?.voice?.channel;
       if (!vc) return interaction.reply({ content: `${EMOJI.CRUZ} Debes estar en un canal de voz.`, flags: 64 });
@@ -613,8 +587,23 @@ module.exports = {
             duration: "?", durationSec: 0,
           };
         }
+
         trackInfo.requestedBy   = interaction.user.toString();
         trackInfo.requestedById = interaction.user.id;
+
+        const q = queues.get(interaction.guildId);
+
+        // ── Evitar duplicados en cola
+        if (q) {
+          const titleNorm = trackInfo.title.toLowerCase();
+          const yaEnCola  = q.queue.some(t => t.title.toLowerCase() === titleNorm);
+          const esActual  = q.current?.title?.toLowerCase() === titleNorm;
+          if (yaEnCola || esActual) {
+            return interaction.editReply({
+              content: `${EMOJI.ADVERTENCIA || "⚠️"} **${trackInfo.title}** ya está en la cola.`
+            });
+          }
+        }
 
         await addToQueue(interaction.guildId, vc, interaction.channel, trackInfo, client);
         await interaction.editReply({ content: `${EMOJI.CHECK} Buscando **${trackInfo.title}** en YouTube...` });
@@ -626,6 +615,7 @@ module.exports = {
       return;
     }
 
+    // ── HISTORIAL ──
     if (sub === "historial") {
       const history = await getRecentHistory(interaction.guildId, 10);
       if (history.length === 0) return interaction.reply({ content: "📭 No hay historial aún.", flags: 64 });
@@ -641,20 +631,42 @@ module.exports = {
       });
     }
 
+    // ── Resto requiere cola activa ──
     const q = queues.get(interaction.guildId);
     if (!q) return interaction.reply({ content: `${EMOJI.CRUZ} No hay música reproduciéndose.`, flags: 64 });
 
     if (sub === "pause")  { q.player.pause();   return interaction.reply({ content: "⏸️ Música pausada." }); }
     if (sub === "resume") { q.player.unpause(); return interaction.reply({ content: "▶️ Música reanudada." }); }
 
+    // ── SKIP — solo quien pidió la canción (o admin) ──
     if (sub === "skip") {
+      const current = q.current;
+      const isAdmin = interaction.member?.permissions?.has("Administrator");
+
+      if (!current) {
+        return interaction.reply({ content: `${EMOJI.CRUZ} No hay canción reproduciéndose.`, flags: 64 });
+      }
+
+      // Las canciones de autocola las puede saltar cualquiera
+      if (!current.isAutocola && current.requestedById && current.requestedById !== interaction.user.id && !isAdmin) {
+        return interaction.reply({
+          content: `${EMOJI.CRUZ} Solo <@${current.requestedById}> o un administrador puede saltar esta canción.`,
+          flags: 64,
+        });
+      }
+
       stopProgressBar(q);
       if (q.safetyTimeout) { clearTimeout(q.safetyTimeout); q.safetyTimeout = null; }
       q.player.stop();
-      return interaction.reply({ content: "⏭️ Canción saltada." });
+      return interaction.reply({ content: `⏭️ Canción saltada por ${interaction.user}.` });
     }
 
+    // ── STOP ──
     if (sub === "stop") {
+      const isAdmin = interaction.member?.permissions?.has("Administrator");
+      if (!isAdmin && q.current?.requestedById !== interaction.user.id) {
+        return interaction.reply({ content: `${EMOJI.CRUZ} Solo un administrador puede parar la música.`, flags: 64 });
+      }
       stopProgressBar(q);
       if (q.safetyTimeout) { clearTimeout(q.safetyTimeout); q.safetyTimeout = null; }
       q.queue = [];
@@ -664,15 +676,21 @@ module.exports = {
       return interaction.reply({ content: "⏹️ Música detenida y cola vaciada." });
     }
 
+    // ── COLA ──
     if (sub === "cola") {
       const autocolaCount = q.queue.filter(t => t.isAutocola).length;
       const lista = [
-        q.current ? `▶️ **${q.current.title}** - ${q.current.duration || "?"} *(reproduciendo)*` : "(nada)",
-        ...q.queue.slice(0, 9).map((t, i) => `${i + 1}. **${t.title}** - ${t.duration || "?"}${t.isAutocola ? " 🤖" : ""}`)
+        q.current
+          ? `▶️ **${q.current.title}** - ${q.current.duration || "?"} *(reproduciendo)* — ${q.current.isAutocola ? "🤖 Autocola" : (q.current.requestedBy || "-")}`
+          : "(nada)",
+        ...q.queue.slice(0, 9).map((t, i) =>
+          `${i + 1}. **${t.title}** - ${t.duration || "?"}${t.isAutocola ? " 🤖" : ` — ${t.requestedBy || "-"}`}`
+        )
       ].join("\n");
       return interaction.reply({
         embeds: [new EmbedBuilder()
-          .setColor("#1DB954").setTitle("🎵 Cola").setDescription(lista || "Vacía.")
+          .setColor("#1DB954").setTitle("🎵 Cola de reproducción")
+          .setDescription(lista || "Vacía.")
           .addFields(
             { name: "📋 Total",    value: `${q.queue.length + (q.current ? 1 : 0)}`, inline: true },
             { name: "🤖 Autocola", value: `${autocolaCount}`, inline: true },
@@ -682,6 +700,7 @@ module.exports = {
       });
     }
 
+    // ── VOLUMEN ──
     if (sub === "volumen") {
       const nivel = interaction.options.getInteger("nivel");
       q.volume = nivel;
