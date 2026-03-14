@@ -267,55 +267,61 @@ async function getYouTubeStream(searchQuery) {
 // AUTOCOLA — canciones del mismo artista via Spotify search
 // ─────────────────────────────────────────────────────────────────────────────
 async function fillAutocola(guildId, queue) {
-  console.log("[Autocola] Buscando recomendaciones para guild:", guildId);
+  console.log("[Autocola] Buscando 1 canción para guild:", guildId);
   try {
     const history = await getRecentHistory(guildId, 10);
     if (history.length === 0) return false;
 
     const artists = [...new Set(history.filter(h => h.artist).map(h => h.artist))];
     if (artists.length === 0) return false;
-    console.log("[Autocola] Artistas:", artists.slice(0, 3));
 
     const recentTitles = new Set(history.map(h => h.title.toLowerCase()));
+    // También excluir lo que ya está en cola
+    for (const t of queue) recentTitles.add(t.title.toLowerCase());
+
     const recs = [];
 
-    for (const artist of artists.slice(0, 3)) {
-      try {
-        const token  = await getSpotifyToken();
-        const tracks = await new Promise(resolve => {
-          https.get({
-            hostname: "api.spotify.com",
-            path:     `/v1/search?q=artist:${encodeURIComponent(artist)}&type=track&limit=5`,
-            headers:  { Authorization: `Bearer ${token}` },
-          }, res => {
-            let data = "";
-            res.on("data", c => data += c);
-            res.on("end", () => {
-              try {
-                const items = JSON.parse(data)?.tracks?.items || [];
-                resolve(items.map(t => ({
-                  searchQuery: `${t.artists[0].name} - ${t.name}`,
-                  title:       `${t.artists[0].name} - ${t.name}`,
-                  artist:      t.artists[0].name,
-                  spotifyUrl:  t.external_urls.spotify,
-                  spotifyId:   t.id,
-                  thumbnail:   t.album.images?.[0]?.url || null,
-                  duration:    msToTime(t.duration_ms),
-                  durationSec: Math.floor(t.duration_ms / 1000),
-                  isAutocola:  true,
-                })));
-              } catch { resolve([]); }
-            });
-          }).on("error", () => resolve([]));
-        });
-        recs.push(...tracks.filter(t => !recentTitles.has(t.title.toLowerCase())));
-      } catch (e) { console.error("[Autocola] Error artista:", e.message); }
-    }
+    // Elegir artista aleatorio del historial
+    const artist = artists[Math.floor(Math.random() * Math.min(artists.length, 5))];
+    console.log("[Autocola] Buscando canciones de:", artist);
 
-    const shuffled = recs.sort(() => Math.random() - 0.5).slice(0, 5);
-    console.log("[Autocola] Canciones añadidas:", shuffled.length);
-    if (shuffled.length === 0) return false;
-    queue.push(...shuffled);
+    try {
+      const token  = await getSpotifyToken();
+      const tracks = await new Promise(resolve => {
+        https.get({
+          hostname: "api.spotify.com",
+          path:     `/v1/search?q=artist:${encodeURIComponent(artist)}&type=track&limit=10`,
+          headers:  { Authorization: `Bearer ${token}` },
+        }, res => {
+          let data = "";
+          res.on("data", c => data += c);
+          res.on("end", () => {
+            try {
+              const items = JSON.parse(data)?.tracks?.items || [];
+              resolve(items.map(t => ({
+                searchQuery: `${t.artists[0].name} - ${t.name}`,
+                title:       `${t.artists[0].name} - ${t.name}`,
+                artist:      t.artists[0].name,
+                spotifyUrl:  t.external_urls.spotify,
+                spotifyId:   t.id,
+                thumbnail:   t.album.images?.[0]?.url || null,
+                duration:    msToTime(t.duration_ms),
+                durationSec: Math.floor(t.duration_ms / 1000),
+                isAutocola:  true,
+              })));
+            } catch { resolve([]); }
+          });
+        }).on("error", () => resolve([]));
+      });
+      recs.push(...tracks.filter(t => !recentTitles.has(t.title.toLowerCase())));
+    } catch (e) { console.error("[Autocola] Error artista:", e.message); }
+
+    if (recs.length === 0) return false;
+
+    // Añadir solo 1 canción aleatoria
+    const pick = recs[Math.floor(Math.random() * recs.length)];
+    console.log("[Autocola] Añadiendo:", pick.title);
+    queue.push(pick);
     return true;
   } catch (e) {
     console.error("[Autocola] ERROR:", e.message);
@@ -555,8 +561,19 @@ async function addToQueue(guildId, voiceChannel, textChannel, track, client) {
     await startTrack(guildId, client);
 
   } else {
-    q.queue.push(track);
+    // Si la canción es manual, va antes de las de autocola
+    if (!track.isAutocola) {
+      const firstAutocola = q.queue.findIndex(t => t.isAutocola);
+      if (firstAutocola !== -1) {
+        q.queue.splice(firstAutocola, 0, track);
+      } else {
+        q.queue.push(track);
+      }
+    } else {
+      q.queue.push(track);
+    }
     q.textChannel = textChannel;
+    const pos = q.queue.indexOf(track) + 1;
     textChannel.send({
       embeds: [new EmbedBuilder()
         .setColor("#1DB954")
@@ -564,7 +581,7 @@ async function addToQueue(guildId, voiceChannel, textChannel, track, client) {
         .setDescription(`**${track.title}**`)
         .addFields(
           { name: "⏱️ Duración", value: track.duration || "?", inline: true },
-          { name: "📋 Posición", value: `#${q.queue.length}`,  inline: true },
+          { name: "📋 Posición", value: `#${pos}`,  inline: true },
         )
         .setFooter({ text: "NexaBot Music" })
       ]
