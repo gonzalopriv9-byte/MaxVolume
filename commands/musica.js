@@ -15,6 +15,7 @@ const https     = require("https");
 const fs        = require("fs");
 const path      = require("path");
 const { createClient } = require("@supabase/supabase-js");
+const { startVoiceListener } = require("../utils/voz");
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
@@ -515,6 +516,11 @@ async function enqueue(guildId, voiceChannel, textChannel, track, client) {
     try {
       await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
       console.log("[Music] Conexión lista ✅");
+    // Activar reconocimiento de voz
+    try {
+      const musicTextChannel = textChannel;
+      startVoiceListener(connection, musicTextChannel, client, guildId);
+    } catch (e) { console.warn("[Voz] No se pudo activar:", e.message); }
     } catch (e) { connection.destroy(); throw new Error("No se pudo conectar: "+e.message); }
 
     const player = createAudioPlayer();
