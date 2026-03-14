@@ -77,13 +77,37 @@ function startVoiceListener(connection, textChannel, client, guildId) {
       "-loglevel", "error", "pipe:1",
     ]);
 
-    ffmpeg.stdin.on("error", () => {});
+    let closed = false;
+
+    function safeEnd() {
+      if (closed) return;
+      closed = true;
+      try { audioStream.destroy(); } catch {}
+      try { ffmpeg.stdin.end(); } catch {}
+    }
+
+    ffmpeg.stdin.on("error", (err) => {
+      if (err.code === "EPIPE") {
+        console.warn(`[Voz] EPIPE en stdin de ffmpeg para ${userId} (ignorando)`);
+        safeEnd();
+      }
+    });
+
     ffmpeg.stdout.on("error", () => {});
     ffmpeg.on("error", () => { processing.delete(userId); });
+    ffmpeg.on("close", () => {
+      safeEnd();
+    });
 
-    audioStream.pipe(ffmpeg.stdin, { end: true });
-    audioStream.on("end",   () => { try { ffmpeg.stdin.end(); } catch {} });
-    audioStream.on("error", () => { try { ffmpeg.stdin.destroy(); } catch {} processing.delete(userId); });
+    audioStream.on("end", () => {
+      safeEnd();
+    });
+    
+    audioStream.on("error", () => {
+      safeEnd();
+      processing.delete(userId);
+    });
+
     ffmpeg.stdout.pipe(fileStream);
 
     fileStream.on("finish", async () => {
@@ -101,7 +125,7 @@ function startVoiceListener(connection, textChannel, client, guildId) {
 
         const song = extractSong(text);
         if (!song) { processing.delete(userId); return; }
-        console.log(`[Voz] Cancion detectada: "${song}"`);
+        console.log(`[Voz] Canción detectada: "${song}"`);
 
         const guild  = client.guilds.cache.get(guildId);
         const member = guild?.members.cache.get(userId);
