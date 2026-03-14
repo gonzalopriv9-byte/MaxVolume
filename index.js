@@ -862,6 +862,16 @@ client.on("interactionCreate", async (interaction) => {
       await interaction.reply({ content: "Aquí tienes el embed de ejemplo:", embeds: [exampleEmbed], flags: 64 });
       return;
     }
+    // ── BOTONES: MUSICA
+    if (interaction.isButton() && interaction.customId.startsWith("music_")) {
+      const musicaCmd = client.commands.get("musica");
+      if (musicaCmd?.handleMusicButton) {
+        try { await musicaCmd.handleMusicButton(interaction); } 
+        catch (e) { addLog("error", "Error botón música: " + e.message); }
+      }
+      return;
+    }
+
     if (interaction.isButton() && interaction.customId.startsWith("backup_notify_no_")) {
       await interaction.reply({ content: "Perfecto, no se enviará ningún mensaje automático.", flags: 64 });
       return;
