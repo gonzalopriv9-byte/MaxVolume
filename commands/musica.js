@@ -420,9 +420,43 @@ async function playTTSAndThen(q, text, guildId, client) {
   console.log(`[DJ] TTS: "${text}"`);
   q.playingTTS = true;
   stopProgressBar(q);
+
+  // Silenciar a todos en el canal de voz mientras habla el DJ
+  const guild        = client.guilds.cache.get(guildId);
+  const voiceChannel = guild?.channels.cache.get(q.connection.joinConfig.channelId);
+  const mutedUsers   = [];
+
+  if (voiceChannel && guild?.members.me?.permissions.has("MuteMembers")) {
+    for (const [, member] of voiceChannel.members) {
+      if (member.user.bot || member.voice.serverMute) continue;
+      try {
+        await member.voice.setMute(true, "DJ hablando");
+        mutedUsers.push(member.id);
+        console.log(`[DJ] Silenciado: ${member.user.tag}`);
+      } catch (e) { console.warn("[DJ] No se pudo silenciar:", member.user.tag, e.message); }
+    }
+  }
+
+  const unmuteAll = async () => {
+    for (const userId of mutedUsers) {
+      try {
+        const member = guild?.members.cache.get(userId);
+        if (member?.voice?.channelId) {
+          await member.voice.setMute(false, "DJ terminó");
+          console.log(`[DJ] Dessilenciado: ${member.user.tag}`);
+        }
+      } catch {}
+    }
+  };
+
   try {
     const ttsFile = await generateTTS(text);
-    if (!ttsFile) { q.playingTTS = false; await startTrack(guildId, client); return; }
+    if (!ttsFile) {
+      await unmuteAll();
+      q.playingTTS = false;
+      await startTrack(guildId, client);
+      return;
+    }
 
     const resource = createTTSResource(ttsFile);
     q.player.play(resource);
@@ -430,10 +464,12 @@ async function playTTSAndThen(q, text, guildId, client) {
     q.player.once(AudioPlayerStatus.Idle, async () => {
       q.playingTTS = false;
       try { fs.unlinkSync(ttsFile); } catch {}
+      await unmuteAll();
       await startTrack(guildId, client);
     });
   } catch (e) {
     console.error("[DJ] Error TTS:", e.message);
+    await unmuteAll();
     q.playingTTS = false;
     await startTrack(guildId, client);
   }
