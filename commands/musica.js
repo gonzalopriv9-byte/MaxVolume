@@ -1,5 +1,5 @@
 // commands/musica.js
-// Spotify + YouTube (yt-dlp) + gTTS DJ + Autocola + Barra de progreso
+// Spotify + YouTube (yt-dlp) + Edge TTS DJ + Autocola + Barra de progreso
 
 const { SlashCommandBuilder, EmbedBuilder } = require("discord.js");
 const {
@@ -182,13 +182,15 @@ async function generateTTS(text) {
   const outFile  = path.join(TMP_DIR, `tts_${Date.now()}.mp3`);
   const safeText = text.replace(/"/g, "'").replace(/\n/g, " ");
   return new Promise((resolve, reject) => {
-    const gtts = spawn("python3", ["-c",
-      `from gtts import gTTS; tts = gTTS(text="${safeText}", lang='es', slow=False); tts.save('${outFile}')`
+    const tts = spawn("edge-tts", [
+      "--voice", "es-ES-AlvaroNeural",
+      "--text",  safeText,
+      "--write-media", outFile,
     ]);
     let err = "";
-    gtts.stderr.on("data", d => err += d.toString());
-    gtts.on("close", code => {
-      if (code !== 0) return reject(new Error("gTTS: " + err.trim().slice(0, 100)));
+    tts.stderr.on("data", d => err += d.toString());
+    tts.on("close", code => {
+      if (code !== 0) return reject(new Error("edge-tts: " + err.trim().slice(0, 100)));
       resolve(outFile);
     });
   });
