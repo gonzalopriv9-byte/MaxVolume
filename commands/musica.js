@@ -409,21 +409,52 @@ function stopProgress(q) {
 // ─────────────────────────────────────────────────────────────────────────────
 // AUTOCOLA
 // ─────────────────────────────────────────────────────────────────────────────
+async function getBlockedArtists(guildId) {
+  try {
+    // Limpiar expirados
+    await supabase.from("blocked_artists").delete()
+      .eq("guild_id", guildId)
+      .lt("expires_at", new Date().toISOString());
+    const { data } = await supabase.from("blocked_artists")
+      .select("artist").eq("guild_id", guildId);
+    return new Set((data||[]).map(b=>b.artist.toLowerCase()));
+  } catch { return new Set(); }
+}
+
 async function fillAutocola(guildId,queue) {
   try {
     const history=await getHistory(guildId,10);
     if (!history.length) return false;
-    const artists=[...new Set(history.filter(h=>h.artist).map(h=>h.artist))];
-    if (!artists.length) return false;
+
+    const blockedArtists=await getBlockedArtists(guildId);
+
+    // Filtrar artistas bloqueados del historial
+    const artists=[...new Set(
+      history.filter(h=>h.artist&&!blockedArtists.has(h.artist.toLowerCase())).map(h=>h.artist)
+    )];
+    if (!artists.length) {
+      console.log("[Autocola] Todos los artistas del historial están bloqueados");
+      return false;
+    }
+
     const exclude=new Set(history.map(h=>h.title?.toLowerCase()));
     for (const t of queue) exclude.add(t.title?.toLowerCase());
-    const artist=artists[Math.floor(Math.random()*Math.min(artists.length,5))];
-    const tracks=await spArtistTracks(artist,exclude);
-    if (!tracks.length) return false;
-    const pick=tracks[Math.floor(Math.random()*tracks.length)];
-    console.log("[Autocola] →",pick.title);
-    queue.push(pick);
-    return true;
+
+    // Intentar hasta 3 artistas distintos por si todos dan canciones excluidas
+    for (let attempt=0; attempt<3; attempt++) {
+      const artist=artists[Math.floor(Math.random()*Math.min(artists.length,5))];
+      const tracks=await spArtistTracks(artist,exclude);
+
+      // Filtrar también canciones de artistas bloqueados en las recomendaciones
+      const filtered=tracks.filter(t=>!blockedArtists.has(t.artist?.toLowerCase()));
+      if (!filtered.length) continue;
+
+      const pick=filtered[Math.floor(Math.random()*filtered.length)];
+      console.log(`[Autocola] → ${pick.title}`);
+      queue.push(pick);
+      return true;
+    }
+    return false;
   } catch(e){console.error("[Autocola]",e.message);return false;}
 }
 
