@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Music Bot Control</title>
+  <style>
+    body { font-family: Inter, Arial, sans-serif; margin: 0; background: #0b1020; color: #f3f7ff; }
+    .wrap { max-width: 900px; margin: 0 auto; padding: 40px 20px; }
+    .card { background: #141b34; border: 1px solid #28345d; border-radius: 18px; padding: 20px; box-shadow: 0 16px 40px rgba(0,0,0,.25); }
+    input, button { font: inherit; border-radius: 12px; border: 1px solid #33406a; padding: 12px 14px; }
+    input { width: 100%; background: #0f1530; color: #fff; margin-bottom: 12px; }
+    button { background: #6b8cff; color: white; cursor: pointer; }
+    pre { background: #091022; color: #d9e2ff; padding: 16px; border-radius: 14px; overflow: auto; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Discord Music Bot</h1>
+    <p>Panel ligero para comprobar salud del servicio e importar playlists de Spotify.</p>
+
+    <div class="card">
+      <h2>Importar playlist</h2>
+      <input id="playlist" placeholder="Pega aquí la URL o ID de la playlist de Spotify" />
+      <div class="row">
+        <button id="importBtn">Importar</button>
+        <button id="healthBtn">Health</button>
+      </div>
+      <pre id="output">Esperando acciones...</pre>
+    </div>
+  </div>
+  <script>
+    const output = document.getElementById('output');
+    document.getElementById('importBtn').onclick = async () => {
+      const playlist = document.getElementById('playlist').value.trim();
+      const res = await fetch('/api/spotify/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ playlist })
+      });
+      output.textContent = JSON.stringify(await res.json(), null, 2);
+    };
+    document.getElementById('healthBtn').onclick = async () => {
+      const res = await fetch('/api/health');
+      output.textContent = JSON.stringify(await res.json(), null, 2);
+    };
+  </script>
+</body>
+</html>
