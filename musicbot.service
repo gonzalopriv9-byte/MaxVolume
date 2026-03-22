@@ -1,0 +1,16 @@
+[Unit]
+Description=Discord Music Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/pro-discord-music-bot
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node /home/pi/pro-discord-music-bot/src/index.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
